@@ -162,7 +162,46 @@ class Presale_Training_MVP {
         return rest_ensure_response($response);
     }
 
-    // Замени свой метод openrouter_chat на этот
+private static function do_openrouter_request($payload, $api_key) {
+    $url = 'https://openrouter.ai/api/v1/chat/completions';
+
+    $headers = [
+        'Authorization' => 'Bearer ' . $api_key,
+        'Content-Type'  => 'application/json',
+        'HTTP-Referer'  => home_url(),           // важно для OpenRouter
+        'X-OpenRouter-Title' => 'Presale Training Plugin',
+    ];
+
+    $response = wp_remote_post($url, [
+        'headers' => $headers,
+        'body'    => wp_json_encode($payload),
+        'timeout' => 60,
+    ]);
+
+    if (is_wp_error($response)) {
+        return ['error' => $response->get_error_message()];
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $code = wp_remote_retrieve_response_code($response);
+    $data = json_decode($body, true);
+
+    if ($code !== 200) {
+        $error_msg = $data['error']['message'] ?? $body;
+        return ['error' => "HTTP $code: $error_msg"];
+    }
+
+    if (empty($data['choices'][0]['message']['content'])) {
+        return ['error' => 'Empty response from model'];
+    }
+
+    return [
+        'message' => $data['choices'][0]['message']['content'],
+        'model'   => $data['model'] ?? $payload['model'],
+        'usage'   => $data['usage'] ?? null,
+    ];
+}
+    
 private static function openrouter_chat($payload, $with_fallback = false) {
     $api_key = get_option(self::OPTION_API_KEY, '');
     if (empty($api_key)) {
@@ -179,30 +218,41 @@ private static function openrouter_chat($payload, $with_fallback = false) {
         $result = self::do_openrouter_request($payload, $api_key);
 
         if (isset($result['message'])) {
-            return $result; // Успех
+            return $result;
         }
-        // Если ошибка, пробуем следующий по списку (fallback)
+
+        // Логируем ошибку (можно убрать позже)
+        error_log("Presale Training - Model failed: $model | " . ($result['error'] ?? 'unknown'));
     }
 
-    return ['error' => 'All models failed or returned no data.'];
+    return ['error' => 'All models failed. Check API key and model names.'];
 }
-
 // В методе handle_start_request измени обработку ответа:
 public static function handle_start_request() {
-    $scenario_prompt = "Generate a JSON-only response for a presale scenario with these keys: customer_type, mood, use_case, concerns, first_message. Do not add any text before or after the JSON.";
+    $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock (Elementor/JetEngine based products). 
+Return ONLY valid JSON with these exact keys: 
+customer_type, mood, use_case, concerns, first_message.
+No explanations, no markdown, no ```json.";
 
     $response = self::openrouter_chat([
         'model' => self::get_roleplay_model(),
-        'messages' => [['role' => 'system', 'content' => $scenario_prompt]],
-        'temperature' => 0.9,
+        'messages' => [
+            ['role' => 'user', 'content' => $scenario_prompt]
+        ],
+        'temperature' => 0.85,
+        'max_tokens'  => 600,
     ], true);
 
     if (isset($response['error'])) {
-        return new WP_REST_Response($response, 500);
+        return new WP_REST_Response(['error' => $response['error']], 500);
     }
 
     $scenario = self::extract_scenario($response['message']);
-    return rest_ensure_response(['scenario' => $scenario]);
+
+    return rest_ensure_response([
+        'scenario' => $scenario,
+        'raw'      => $response['message']
+    ]);
 }
 
     private static function is_retryable_error($result) {
@@ -368,90 +418,199 @@ public static function handle_start_request() {
             </div>
         </div>
         <script>
-        (function() {
-            const messagesEl = document.getElementById('messages');
-            const inputEl = document.getElementById('agent-input');
-            const evalEl = document.getElementById('evaluation');
-            const scenarioBoxEl = document.getElementById('scenario-box');
-            const state = { messages: [], scenarioText: '' };
+(function() {
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('agent-input');
+    const evalEl = document.getElementById('evaluation');
+    const scenarioBoxEl = document.getElementById('scenario-box');
+    
+    const state = {
+        messages: [],
+        scenario: null,           // теперь храним объект, а не текст
+        isLoading: false
+    };
 
-            function render() {
-                messagesEl.innerHTML = state.messages.map(m => {
-                    const label = m.role === 'assistant' ? 'Customer' : 'Agent';
-                    return `<p><strong>${label}:</strong> ${escapeHtml(m.content)}</p>`;
-                }).join('');
+    function renderMessages() {
+        messagesEl.innerHTML = state.messages.map(m => {
+            const isCustomer = m.role === 'assistant';
+            return `
+                <p style="margin: 8px 0;">
+                    <strong style="color: ${isCustomer ? '#d63638' : '#2271b1'}">
+                        ${isCustomer ? '👤 Клиент:' : '👨‍💼 Вы:'}
+                    </strong><br>
+                    ${escapeHtml(m.content)}
+                </p>
+            `;
+        }).join('');
+        
+        // Автоскролл вниз
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function escapeHtml(str) {
+        return String(str || '').replace(/[&<>"']/g, t => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+        }[t]));
+    }
+
+    function setLoading(isLoading) {
+        state.isLoading = isLoading;
+        const sendBtn = document.getElementById('send-btn');
+        const newBtn = document.getElementById('new-scenario-btn');
+        const evalBtn = document.getElementById('evaluate-btn');
+        
+        sendBtn.disabled = isLoading;
+        newBtn.disabled = isLoading;
+        evalBtn.disabled = isLoading;
+        
+        inputEl.disabled = isLoading;
+    }
+
+    async function api(path, payload = {}) {
+        try {
+            const res = await fetch('<?php echo esc_url_raw(rest_url('training/v1/')); ?>' + path, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-WP-Nonce': '<?php echo esc_js(wp_create_nonce('wp_rest')); ?>'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) {
+                throw new Error(`HTTP error! status: ${res.status}`);
             }
 
-            function escapeHtml(str) {
-                return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
+            return await res.json();
+        } catch (err) {
+            console.error(err);
+            return { error: err.message || 'Ошибка соединения с сервером' };
+        }
+    }
+
+    async function loadScenario() {
+        setLoading(true);
+        scenarioBoxEl.innerHTML = '<em>Генерируем новый сценарий...</em>';
+        
+        try {
+            const data = await api('start');
+
+            if (data.error) {
+                scenarioBoxEl.innerHTML = `<span style="color:red;">Ошибка: ${escapeHtml(data.error)}</span>`;
+                return;
             }
 
-            async function api(path, payload) {
-                const res = await fetch('<?php echo esc_url_raw(rest_url('training/v1/')); ?>' + path, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-WP-Nonce': '<?php echo esc_js(wp_create_nonce('wp_rest')); ?>'
-                    },
-                    body: JSON.stringify(payload || {})
+            if (data.scenario) {
+                state.scenario = data.scenario;
+                
+                // Красивое отображение сценария
+                scenarioBoxEl.innerHTML = `
+                    <strong>Сценарий:</strong><br>
+                    <strong>Тип клиента:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
+                    <strong>Настроение:</strong> ${escapeHtml(data.scenario.mood)}<br>
+                    <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
+                    <strong>Главные опасения:</strong> ${escapeHtml(data.scenario.concerns)}
+                `;
+
+                // Начинаем диалог с первого сообщения клиента
+                state.messages = [{
+                    role: 'assistant',
+                    content: data.scenario.first_message || "Здравствуйте, я хотел бы узнать про Crocoblock..."
+                }];
+                
+                renderMessages();
+            }
+        } catch (e) {
+            scenarioBoxEl.innerHTML = '<span style="color:red;">Не удалось загрузить сценарий</span>';
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    // === Обработчики ===
+    document.getElementById('send-btn').addEventListener('click', sendMessage);
+    
+    // Отправка по Enter (Shift+Enter = новая строка)
+    inputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text || state.isLoading) return;
+
+        // Добавляем сообщение агента
+        state.messages.push({ role: 'user', content: text });
+        inputEl.value = '';
+        renderMessages();
+        setLoading(true);
+
+        try {
+            const data = await api('chat', { 
+                messages: state.messages, 
+                scenario: state.scenario 
+            });
+
+            if (data.message) {
+                state.messages.push({ role: 'assistant', content: data.message });
+            } else if (data.error) {
+                state.messages.push({ 
+                    role: 'assistant', 
+                    content: `[Ошибка] ${data.error}` 
                 });
-                return await res.json();
             }
-
-            async function loadScenario() {
-                scenarioBoxEl.textContent = 'Loading random scenario...';
-                const data = await api('start');
-                if (data.scenario) {
-                    const s = data.scenario;
-                    state.scenarioText = `customer_type: ${s.customer_type || ''}\nmood: ${s.mood || ''}\nuse_case: ${s.use_case || ''}\nconcerns: ${(s.concerns || '')}`;
-                    scenarioBoxEl.textContent = state.scenarioText;
-                    if (s.first_message) {
-                        state.messages = [{ role: 'assistant', content: s.first_message }];
-                        render();
-                    }
-                } else {
-                    state.scenarioText = data.scenario_raw || 'Failed to generate scenario';
-                    scenarioBoxEl.textContent = state.scenarioText;
-                }
-            }
-
-            document.getElementById('send-btn').addEventListener('click', async () => {
-                const text = inputEl.value.trim();
-                if (!text) return;
-                state.messages.push({ role: 'user', content: text });
-                inputEl.value = '';
-                render();
-
-                const data = await api('chat', { messages: state.messages, scenario: state.scenarioText });
-                if (data.message) {
-                    state.messages.push({ role: 'assistant', content: data.message });
-                } else {
-                    state.messages.push({ role: 'assistant', content: '[Error] ' + JSON.stringify(data.error || data) });
-                }
-                render();
+        } catch (err) {
+            state.messages.push({ 
+                role: 'assistant', 
+                content: '[Ошибка соединения]' 
             });
+        } finally {
+            renderMessages();
+            setLoading(false);
+        }
+    }
 
-            document.getElementById('evaluate-btn').addEventListener('click', async () => {
-                const data = await api('evaluate', { messages: state.messages });
-                evalEl.textContent = data.message || JSON.stringify(data.error || data, null, 2);
-            });
+    document.getElementById('evaluate-btn').addEventListener('click', async () => {
+        if (state.messages.length < 3) {
+            evalEl.textContent = 'Слишком короткий диалог для оценки.';
+            return;
+        }
 
-            document.getElementById('reset-btn').addEventListener('click', () => {
-                state.messages = [];
-                evalEl.textContent = '';
-                render();
-            });
+        setLoading(true);
+        evalEl.textContent = 'Анализирую разговор...';
 
-            document.getElementById('new-scenario-btn').addEventListener('click', async () => {
-                state.messages = [];
-                evalEl.textContent = '';
-                render();
-                await loadScenario();
-            });
+        const data = await api('evaluate', { messages: state.messages });
+        
+        if (data.message) {
+            evalEl.textContent = data.message;
+        } else {
+            evalEl.textContent = data.error ? `Ошибка: ${data.error}` : JSON.stringify(data, null, 2);
+        }
+        
+        setLoading(false);
+    });
 
-            loadScenario();
-        })();
-        </script>
+    document.getElementById('reset-btn').addEventListener('click', () => {
+        state.messages = [];
+        evalEl.textContent = '';
+        renderMessages();
+    });
+
+    document.getElementById('new-scenario-btn').addEventListener('click', () => {
+        state.messages = [];
+        evalEl.textContent = '';
+        renderMessages();
+        loadScenario();
+    });
+
+    // Запуск
+    loadScenario();
+
+})();
+</script>
         <?php
     }
 }
