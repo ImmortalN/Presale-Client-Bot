@@ -15,6 +15,7 @@ class Presale_Training_MVP {
     const OPTION_ROLEPLAY_MODEL = 'presale_training_roleplay_model';
     const OPTION_EVAL_MODEL = 'presale_training_eval_model';
     const OPTION_LAST_RESULT = 'presale_training_last_result';
+    const OPTION_ROLEPLAY_FALLBACK_MODELS = 'presale_training_roleplay_fallback_models';
 
     public static function init() {
         add_action('admin_menu', [__CLASS__, 'register_admin_pages']);
@@ -33,6 +34,7 @@ class Presale_Training_MVP {
         register_setting('presale_training_settings', self::OPTION_API_KEY);
         register_setting('presale_training_settings', self::OPTION_ROLEPLAY_MODEL);
         register_setting('presale_training_settings', self::OPTION_EVAL_MODEL);
+        register_setting('presale_training_settings', self::OPTION_ROLEPLAY_FALLBACK_MODELS);
     }
 
     public static function register_rest_routes() {
@@ -76,7 +78,7 @@ class Presale_Training_MVP {
         }
 
         $scenario_text = $response['message'];
-        $scenario = self::try_parse_json_object($scenario_text);
+        $scenario = self::extract_scenario($scenario_text);
 
         return rest_ensure_response([
             'scenario_raw' => $scenario_text,
@@ -166,14 +168,29 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'OpenRouter API key is not configured'], 400);
         }
 
-        $result = self::do_openrouter_request($payload, $api_key);
-
-        if ($with_fallback && self::should_retry_with_fallback($result)) {
-            $payload['model'] = 'meta-llama/llama-3.3-70b-instruct:free';
-            $result = self::do_openrouter_request($payload, $api_key);
+        $models = [$payload['model']];
+        if ($with_fallback) {
+            $models = array_merge($models, self::get_roleplay_fallback_models());
         }
 
-        return $result;
+        $last_result = null;
+        foreach ($models as $model) {
+            $payload['model'] = $model;
+            $result = self::do_openrouter_request($payload, $api_key);
+            $last_result = $result;
+
+            if (!($result instanceof WP_REST_Response)) {
+                return $result;
+            }
+
+            if (!self::is_retryable_error($result)) {
+                return $result;
+            }
+
+            sleep(1);
+        }
+
+        return $last_result;
     }
 
     private static function do_openrouter_request($payload, $api_key) {
@@ -206,16 +223,66 @@ class Presale_Training_MVP {
         ];
     }
 
-    private static function should_retry_with_fallback($result) {
+    private static function is_retryable_error($result) {
         if (!($result instanceof WP_REST_Response)) {
             return false;
         }
+
+        $status = $result->get_status();
         $data = $result->get_data();
-        $message = isset($data['error']['error']['message']) ? (string) $data['error']['error']['message'] : '';
-        if ($message === '' && isset($data['error']['message'])) {
-            $message = (string) $data['error']['message'];
+        $message = self::extract_error_message($data);
+
+        if ($status === 429) {
+            return true;
         }
-        return stripos($message, 'No endpoints found') !== false;
+
+        if (stripos($message, 'No endpoints found') !== false) {
+            return true;
+        }
+
+        if (stripos($message, 'rate-limited') !== false || stripos($message, 'rate limited') !== false) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static function extract_error_message($data) {
+        if (isset($data['error']['error']['message'])) {
+            return (string) $data['error']['error']['message'];
+        }
+
+        if (isset($data['error']['message'])) {
+            return (string) $data['error']['message'];
+        }
+
+        if (isset($data['message'])) {
+            return (string) $data['message'];
+        }
+
+        return '';
+    }
+
+    private static function extract_scenario($text) {
+        $scenario = self::try_parse_json_object($text);
+        if (is_array($scenario)) {
+            return $scenario;
+        }
+
+        if (preg_match('/\{.*\}/s', (string) $text, $matches)) {
+            $scenario = self::try_parse_json_object($matches[0]);
+            if (is_array($scenario)) {
+                return $scenario;
+            }
+        }
+
+        return [
+            'customer_type' => 'beginner WordPress user',
+            'mood' => 'curious but cautious',
+            'use_case' => 'wants to build a marketplace website',
+            'concerns' => 'worried about complexity and budget',
+            'first_message' => 'Hi! I want to build a marketplace site, but I am not sure how hard it will be. Can you help?',
+        ];
     }
 
     private static function try_parse_json_object($text) {
@@ -224,7 +291,14 @@ class Presale_Training_MVP {
         if (is_array($decoded)) {
             return $decoded;
         }
+
         return null;
+    }
+
+    private static function get_roleplay_fallback_models() {
+        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash,openai/gpt-4.1-mini');
+        $models = array_filter(array_map('trim', explode(',', $raw)));
+        return array_values(array_unique($models));
     }
 
     private static function get_roleplay_model() {
@@ -239,6 +313,7 @@ class Presale_Training_MVP {
         $api_key = esc_attr(get_option(self::OPTION_API_KEY, ''));
         $roleplay_model = esc_attr(self::get_roleplay_model());
         $eval_model = esc_attr(self::get_eval_model());
+        $fallback_models = esc_attr(get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash,openai/gpt-4.1-mini'));
         ?>
         <div class="wrap">
             <h1>Presale Training — Settings</h1>
@@ -252,6 +327,13 @@ class Presale_Training_MVP {
                     <tr>
                         <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>">Roleplay Model</label></th>
                         <td><input type="text" id="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>" name="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>" value="<?php echo $roleplay_model; ?>" class="regular-text" /></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>">Roleplay Fallback Models</label></th>
+                        <td>
+                            <input type="text" id="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>" name="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>" value="<?php echo $fallback_models; ?>" class="regular-text" />
+                            <p class="description">Comma-separated models used when roleplay model has no endpoint or is rate-limited.</p>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="<?php echo esc_attr(self::OPTION_EVAL_MODEL); ?>">Evaluation Model</label></th>
