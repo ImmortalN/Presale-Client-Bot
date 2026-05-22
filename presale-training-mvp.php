@@ -2,9 +2,10 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.2.1
+ * Version: 0.2.2
  * Author: Team
  */
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -58,7 +59,7 @@ class Presale_Training_MVP {
         return current_user_can('manage_options');
     }
 
-    // ====================== API METHODS ======================
+    // ====================== CORE API ======================
 
     private static function do_openrouter_request($payload, $api_key) {
         $url = 'https://openrouter.ai/api/v1/chat/completions';
@@ -85,7 +86,7 @@ class Presale_Training_MVP {
         $data = json_decode($body, true);
 
         if ($code !== 200) {
-            $error_msg = $data['error']['message'] ?? $body ?? 'Unknown error';
+            $error_msg = isset($data['error']['message']) ? $data['error']['message'] : $body;
             return ['error' => "HTTP $code: $error_msg"];
         }
 
@@ -111,8 +112,10 @@ class Presale_Training_MVP {
         }
 
         foreach ($models as $model) {
-            $payload['model'] = $model;
-            $result = self::do_openrouter_request($payload, $api_key);
+            $payload_copy = $payload;           // Важно! Не мутировать оригинальный payload
+            $payload_copy['model'] = $model;
+
+            $result = self::do_openrouter_request($payload_copy, $api_key);
 
             if (isset($result['message'])) {
                 return $result;
@@ -154,14 +157,14 @@ class Presale_Training_MVP {
 
     public static function handle_chat_request(WP_REST_Request $request) {
         $messages = $request->get_param('messages');
-        $scenario = $request->get_param('scenario'); // теперь объект
+        $scenario = $request->get_param('scenario');
 
         if (!is_array($messages)) {
             return new WP_REST_Response(['error' => 'messages must be an array'], 400);
         }
 
         $scenario_text = is_array($scenario) 
-            ? "Customer profile: " . wp_json_encode($scenario, JSON_UNESCAPED_UNICODE) 
+            ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE) 
             : (string) $scenario;
 
         $system_prompt = "You are acting as a realistic potential customer interested in Crocoblock products.\n\n"
@@ -196,7 +199,10 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'messages must be a non-empty array'], 400);
         }
 
-        $eval_prompt = "You are evaluating a presale agent..."; // можно расширить позже
+        $eval_prompt = "You are evaluating a presale agent.\n\n"
+            . "Analyze the conversation and provide scores (1-10) for:\n"
+            . "- clarity, empathy, discovery, objection handling, sales communication.\n"
+            . "Then give strengths, weaknesses, missed opportunities and suggestions.";
 
         $response = self::openrouter_chat([
             'model' => self::get_eval_model(),
@@ -222,15 +228,11 @@ class Presale_Training_MVP {
 
     private static function extract_scenario($text) {
         $scenario = self::try_parse_json_object($text);
-        if (is_array($scenario)) {
-            return $scenario;
-        }
+        if (is_array($scenario)) return $scenario;
 
         if (preg_match('/\{.*\}/s', (string)$text, $matches)) {
             $scenario = self::try_parse_json_object($matches[0]);
-            if (is_array($scenario)) {
-                return $scenario;
-            }
+            if (is_array($scenario)) return $scenario;
         }
 
         // Fallback
@@ -239,7 +241,7 @@ class Presale_Training_MVP {
             'mood'          => 'curious but cautious',
             'use_case'      => 'wants to build a marketplace website',
             'concerns'      => 'worried about complexity and budget',
-            'first_message' => 'Hi! I want to build a marketplace site, but I am not sure how hard it will be. Can you help?',
+            'first_message' => 'Hi! I want to build a marketplace site with Crocoblock, but I\'m not sure how hard it will be. Can you help?',
         ];
     }
 
@@ -250,7 +252,7 @@ class Presale_Training_MVP {
     }
 
     private static function get_roleplay_fallback_models() {
-        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash');
+        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'google/gemini-2.5-flash,mistralai/mistral-small-3.1-24b-instruct:free');
         $models = array_filter(array_map('trim', explode(',', $raw)));
         return array_values(array_unique($models));
     }
