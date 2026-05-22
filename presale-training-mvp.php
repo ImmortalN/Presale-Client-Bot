@@ -101,31 +101,38 @@ class Presale_Training_MVP {
     }
 
     private static function openrouter_chat($payload, $with_fallback = false) {
-        $api_key = get_option(self::OPTION_API_KEY, '');
-        if (empty($api_key)) {
-            return ['error' => 'OpenRouter API key is not configured'];
-        }
-
-        $models = [$payload['model']];
-        if ($with_fallback) {
-            $models = array_merge($models, self::get_roleplay_fallback_models());
-        }
-
-        foreach ($models as $model) {
-            $payload_copy = $payload;           // Важно! Не мутировать оригинальный payload
-            $payload_copy['model'] = $model;
-
-            $result = self::do_openrouter_request($payload_copy, $api_key);
-
-            if (isset($result['message'])) {
-                return $result;
-            }
-
-            error_log("Presale Training - Model failed: $model | " . ($result['error'] ?? 'unknown'));
-        }
-
-        return ['error' => 'All models failed. Check API key and model names.'];
+    $api_key = get_option(self::OPTION_API_KEY, '');
+    if (empty($api_key)) {
+        return ['error' => 'OpenRouter API key is not configured'];
     }
+
+    $models = [$payload['model']];
+    if ($with_fallback) {
+        $models = array_merge($models, self::get_roleplay_fallback_models());
+    }
+
+    foreach ($models as $model) {
+        $payload_copy = $payload;
+        $payload_copy['model'] = $model;
+        
+        // ←←← КРИТИЧНОЕ ИСПРАВЛЕНИЕ
+        if (!isset($payload_copy['max_tokens'])) {
+            $payload_copy['max_tokens'] = 1200;     // сильно уменьшили
+        }
+
+        $result = self::do_openrouter_request($payload_copy, $api_key);
+
+        if (isset($result['message'])) {
+            error_log("Presale Training - SUCCESS with model: $model");
+            return $result;
+        }
+
+        $error = $result['error'] ?? 'unknown error';
+        error_log("Presale Training - FAILED model '$model': $error");
+    }
+
+    return ['error' => 'All models failed. Check error log.'];
+}
 
     // ====================== HANDLERS ======================
 
@@ -252,10 +259,12 @@ class Presale_Training_MVP {
     }
 
     private static function get_roleplay_fallback_models() {
-        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'google/gemini-2.5-flash,mistralai/mistral-small-3.1-24b-instruct:free');
-        $models = array_filter(array_map('trim', explode(',', $raw)));
-        return array_values(array_unique($models));
-    }
+    $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 
+        'google/gemini-2.5-flash,openai/gpt-4o-mini,qwen/qwen2.5-32b-instruct:free');
+    
+    $models = array_filter(array_map('trim', explode(',', $raw)));
+    return array_values(array_unique($models));
+}
 
     private static function get_roleplay_model() {
         return get_option(self::OPTION_ROLEPLAY_MODEL, 'google/gemini-2.5-flash');
@@ -303,47 +312,133 @@ class Presale_Training_MVP {
     }
 
     public static function render_results_page() {
-        $result = get_option(self::OPTION_LAST_RESULT, []);
-        ?>
-        <div class="wrap">
-            <h1>Presale Training — Results</h1>
-            <?php if (empty($result)) : ?>
-                <p>No results yet. Finish a chat and click Evaluate.</p>
-            <?php else : ?>
-                <p><strong>Last evaluation:</strong> <?php echo esc_html($result['created_at']); ?></p>
-                <h2>Feedback</h2>
-                <pre style="white-space: pre-wrap; background: #fff; border: 1px solid #dcdcde; padding: 12px;"><?php echo esc_html($result['feedback']); ?></pre>
-                <h2>Conversation</h2>
-                <div style="background: #fff; border: 1px solid #dcdcde; padding: 12px;">
-                    <?php foreach (($result['messages'] ?? []) as $message) : ?>
-                        <p><strong><?php echo esc_html($message['role'] === 'assistant' ? 'Customer' : 'Agent'); ?>:</strong> <?php echo esc_html($message['content'] ?? ''); ?></p>
-                    <?php endforeach; ?>
-                </div>
-            <?php endif; ?>
-        </div>
-        <?php
-    }
+    global $wpdb;
+    $results = $wpdb->get_results("
+        SELECT * FROM {$wpdb->options} 
+        WHERE option_name LIKE 'presale_training_result_%' 
+        ORDER BY option_id DESC 
+        LIMIT 30
+    ");
 
-    public static function render_chat_page() {
-        ?>
-        <div class="wrap">
-            <h1>Presale Training — Chat</h1>
-            <div id="presale-training-app" style="max-width: 900px; background: #fff; border: 1px solid #dcdcde; padding: 16px;">
-                <p><button class="button" id="new-scenario-btn">New Random Scenario</button></p>
-                <div id="scenario-box" style="background:#f6f7f7;padding:12px;border:1px solid #dcdcde;margin-bottom:12px;"></div>
-                <div id="messages" style="border:1px solid #dcdcde;min-height:220px;padding:12px;margin:12px 0;background:#f9f9f9;"></div>
-                <textarea id="agent-input" style="width:100%;min-height:80px;" placeholder="Type your answer as presale agent..."></textarea>
-                <p>
-                    <button class="button button-primary" id="send-btn">Send</button>
-                    <button class="button" id="evaluate-btn">Evaluate Conversation</button>
-                    <button class="button" id="reset-btn">Reset Chat</button>
-                </p>
-                <pre id="evaluation" style="white-space: pre-wrap; background:#f6f7f7; padding:12px;"></pre>
+    ?>
+    <div class="wrap">
+        <h1>Presale Training — Результаты</h1>
+
+        <table class="wp-list-table widefat fixed striped">
+            <thead>
+                <tr>
+                    <th>Дата</th>
+                    <th>Пользователь</th>
+                    <th>Общий балл</th>
+                    <th>Clarity</th>
+                    <th>Empathy</th>
+                    <th>Discovery</th>
+                    <th>Objection</th>
+                    <th>Sales</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($results)) : ?>
+                    <tr><td colspan="9">Пока нет оценённых разговоров.</td></tr>
+                <?php else : ?>
+                    <?php foreach ($results as $row) : 
+                        $data = unserialize($row->option_value); 
+                        $feedback = $data['feedback'] ?? '';
+                        // Парсим баллы (простой способ)
+                        preg_match_all('/(\w+).*?(\d+)\/10/', $feedback, $matches);
+                        $scores = array_combine($matches[1] ?? [], $matches[2] ?? []);
+                    ?>
+                    <tr>
+                        <td><?php echo esc_html($data['created_at']); ?></td>
+                        <td><?php echo wp_get_current_user()->display_name; ?></td>
+                        <td><strong><?php echo array_sum($scores) ?? '—'; ?>/50</strong></td>
+                        <td><?php echo $scores['Clarity'] ?? '—'; ?></td>
+                        <td><?php echo $scores['Empathy'] ?? '—'; ?></td>
+                        <td><?php echo $scores['Discovery'] ?? '—'; ?></td>
+                        <td><?php echo $scores['Objection'] ?? '—'; ?></td>
+                        <td><?php echo $scores['Sales'] ?? '—'; ?></td>
+                        <td>
+                            <button class="button view-details" data-feedback="<?php echo esc_attr($feedback); ?>">Подробно</button>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+    document.querySelectorAll('.view-details').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const feedback = btn.dataset.feedback;
+            alert(feedback); // позже можно сделать красивый модальный
+        });
+    });
+    </script>
+    <?php
+}
+
+public static function render_chat_page() {
+    ?>
+    <div class="wrap">
+        <h1>Presale Training — Chat</h1>
+        
+        <div id="presale-training-app" style="max-width: 1100px; margin: 20px 0; background: #fff; border: 1px solid #c3c4c7; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+
+            <!-- Header -->
+            <div style="padding: 16px 20px; background: #f6f7f7; border-bottom: 1px solid #c3c4c7; display: flex; justify-content: space-between; align-items: center;">
+                <button class="button" id="new-scenario-btn">Новый случайный сценарий</button>
+                <div id="scenario-box" style="flex: 1; margin: 0 20px; font-size: 14px; line-height: 1.5;"></div>
             </div>
+
+            <!-- Chat Area -->
+            <div style="display: flex; height: 620px;">
+                
+                <!-- Messages -->
+                <div id="messages" style="
+                    flex: 1; 
+                    padding: 20px; 
+                    overflow-y: auto; 
+                    background: #f9f9f9; 
+                    border-right: 1px solid #c3c4c7;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 16px;
+                "></div>
+
+                <!-- Sidebar (optional: scenario info) -->
+                <div style="width: 280px; padding: 20px; background: #fff; border-left: 1px solid #c3c4c7; overflow-y: auto;">
+                    <h3 style="margin-top:0;">Инструкция агенту</h3>
+                    <small>Старайся:</small>
+                    <ul style="font-size:13px; line-height:1.4;">
+                        <li>Задавать уточняющие вопросы</li>
+                        <li>Работать с возражениями</li>
+                        <li>Связывать фичи с болью клиента</li>
+                        <li>Закрывать на следующий шаг</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div style="padding: 16px 20px; background: #f6f7f7; border-top: 1px solid #c3c4c7;">
+                <textarea id="agent-input" style="width:100%; min-height: 110px; resize: vertical; padding: 12px; font-size: 15px;" 
+                    placeholder="Напишите ответ как presale-агент..."></textarea>
+                
+                <div style="margin-top: 12px; display: flex; gap: 10px;">
+                    <button class="button button-primary" id="send-btn" style="padding: 8px 20px;">Отправить</button>
+                    <button class="button" id="evaluate-btn">Оценить разговор</button>
+                    <button class="button" id="reset-btn">Сбросить чат</button>
+                </div>
+            </div>
+
+            <!-- Evaluation -->
+            <div id="evaluation" style="padding: 20px; background: #f0f0f1; border-top: 1px solid #c3c4c7; white-space: pre-wrap; display: none;"></div>
         </div>
-        <script>
-(function() {
-    const messagesEl = document.getElementById('messages');
+    </div>
+
+    <script>
+    (function() {
     const inputEl = document.getElementById('agent-input');
     const evalEl = document.getElementById('evaluation');
     const scenarioBoxEl = document.getElementById('scenario-box');
@@ -353,23 +448,30 @@ class Presale_Training_MVP {
         scenario: null,           // теперь храним объект, а не текст
         isLoading: false
     };
-
-    function renderMessages() {
-        messagesEl.innerHTML = state.messages.map(m => {
-            const isCustomer = m.role === 'assistant';
-            return `
-                <p style="margin: 8px 0;">
-                    <strong style="color: ${isCustomer ? '#d63638' : '#2271b1'}">
-                        ${isCustomer ? '👤 Клиент:' : '👨‍💼 Вы:'}
-                    </strong><br>
-                    ${escapeHtml(m.content)}
-                </p>
-            `;
-        }).join('');
+    const messagesEl = document.getElementById('messages');
         
-        // Автоскролл вниз
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
+        function renderMessages() {
+            messagesEl.innerHTML = state.messages.map(m => {
+                const isCustomer = m.role === 'assistant';
+                return `
+                    <div style="max-width: 85%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
+                        <div style="font-size: 13px; color: #666; margin-bottom: 4px;">
+                            ${isCustomer ? '👤 Клиент' : '👨‍💼 Вы'}
+                        </div>
+                        <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; 
+                                    color: ${isCustomer ? '#000' : '#fff'}; 
+                                    padding: 14px 18px; 
+                                    border-radius: 12px; 
+                                    font-size: 15.5px; 
+                                    line-height: 1.45;">
+                            ${escapeHtml(m.content)}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
 
     function escapeHtml(str) {
         return String(str || '').replace(/[&<>"']/g, t => ({
