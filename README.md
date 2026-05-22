@@ -1,45 +1,21 @@
 # Presale Client Bot MVP (WordPress)
 
-## Страницы плагина
+## Сторінки плагіна
 
-- **Chat** — тренировка с рандомным сценарием.
-- **Results** — последний разбор разговора.
-- **Settings** — API key + модели.
+- **Chat** — тренування з випадковим сценарієм.
+- **Results** — останній розбір розмови.
+- **Settings** — API key + моделі.
 
-## REST endpoints
+## REST endpoint-и
 
-- `POST /wp-json/training/v1/start` — генерация рандомного сценария.
-- `POST /wp-json/training/v1/chat` — ответ AI-клиента.
-- `POST /wp-json/training/v1/evaluate` — оценка диалога.
+- `POST /wp-json/training/v1/start` — генерація випадкового сценарію.
+- `POST /wp-json/training/v1/chat` — відповідь AI-клієнта.
+- `POST /wp-json/training/v1/evaluate` — оцінювання діалогу.
 
-## Что исправлено
+## Що виправлено
 
-- Сценарий больше не выбирается вручную: генерируется автоматически.
-- Добавлены отдельные подстраницы: Chat / Results / Settings.
-- Добавлены fallback-модели для roleplay в Settings (список через запятую).
-- Добавлен retry/fallback не только при `No endpoints found`, но и при `429 rate-limited`.
-- Если AI вернул сценарий не в чистом JSON, плагин пытается извлечь JSON из текста; если не удалось — использует безопасный дефолтный сценарий.
-- Добавлен fallback на `meta-llama/llama-3.3-70b-instruct:free`, если OpenRouter возвращает `No endpoints found` для выбранной модели.
-Минимальный MVP для тренировки presale-диалогов прямо в WP Admin.
-
-## Что есть
-
-- Admin page `Presale Training`.
-- REST endpoint `POST /wp-json/training/v1/chat`.
-- REST endpoint `POST /wp-json/training/v1/evaluate`.
-- OpenRouter integration для roleplay и evaluation.
-
-## Установка
-
-1. Скопируйте `presale-training-mvp.php` в `wp-content/plugins/presale-training-mvp/`.
-2. Активируйте плагин в WordPress.
-3. Перейдите в `Presale Training` в админке.
-4. Вставьте OpenRouter API key и сохраните.
-5. Тестируйте чат и кнопку `Evaluate Conversation`.
-
-## Дефолтные модели
-
-- Roleplay: `deepseek/deepseek-chat-v3-0324:free`
-- Evaluation: `google/gemini-2.5-pro`
-
-Можно поменять прямо в настройках страницы.
+- Сценарій більше не обирається вручну: генерується автоматично.
+- Додано окремі підсторінки: Chat / Results / Settings.
+- Додано fallback-моделі для roleplay у Settings (список через кому).
+- Додано retry/fallback не лише для `No endpoints found`, а й для `429 rate-limited`.
+- Якщо AI повернув сценарій не в чистому JSON, плагін намагається витягти JSON із тексту; якщо не вдається — використовує безпечний дефолтний сценарій.

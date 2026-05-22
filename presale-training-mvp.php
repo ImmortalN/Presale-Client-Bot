@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.2.2
+ * Version: 0.2.3
  * Author: Team
  */
 
@@ -59,21 +59,15 @@ class Presale_Training_MVP {
         return current_user_can('manage_options');
     }
 
-    // ====================== CORE API ======================
-
     private static function do_openrouter_request($payload, $api_key) {
-        $url = 'https://openrouter.ai/api/v1/chat/completions';
-
-        $headers = [
-            'Authorization'      => 'Bearer ' . $api_key,
-            'Content-Type'       => 'application/json',
-            'HTTP-Referer'       => home_url(),
-            'X-OpenRouter-Title' => 'Presale Training Plugin',
-        ];
-
-        $response = wp_remote_post($url, [
-            'headers' => $headers,
-            'body'    => wp_json_encode($payload),
+        $response = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $api_key,
+                'Content-Type' => 'application/json',
+                'HTTP-Referer' => home_url(),
+                'X-OpenRouter-Title' => 'Presale Training Plugin',
+            ],
+            'body' => wp_json_encode($payload),
             'timeout' => 60,
         ]);
 
@@ -90,51 +84,43 @@ class Presale_Training_MVP {
             return ['error' => "HTTP $code: $error_msg"];
         }
 
-        if (empty($data['choices'][0]['message']['content'])) {
+        $content = $data['choices'][0]['message']['content'] ?? '';
+        if ($content === '') {
             return ['error' => 'Empty response from model'];
         }
 
         return [
-            'message' => $data['choices'][0]['message']['content'],
-            'model'   => $data['model'] ?? $payload['model'],
+            'message' => $content,
+            'model' => $data['model'] ?? $payload['model'],
         ];
     }
 
     private static function openrouter_chat($payload, $with_fallback = false) {
-    $api_key = get_option(self::OPTION_API_KEY, '');
-    if (empty($api_key)) {
-        return ['error' => 'OpenRouter API key is not configured'];
-    }
-
-    $models = [$payload['model']];
-    if ($with_fallback) {
-        $models = array_merge($models, self::get_roleplay_fallback_models());
-    }
-
-    foreach ($models as $model) {
-        $payload_copy = $payload;
-        $payload_copy['model'] = $model;
-        
-        // ←←← КРИТИЧНОЕ ИСПРАВЛЕНИЕ
-        if (!isset($payload_copy['max_tokens'])) {
-            $payload_copy['max_tokens'] = 1200;     // сильно уменьшили
+        $api_key = get_option(self::OPTION_API_KEY, '');
+        if (empty($api_key)) {
+            return ['error' => 'OpenRouter API key is not configured'];
         }
 
-        $result = self::do_openrouter_request($payload_copy, $api_key);
-
-        if (isset($result['message'])) {
-            error_log("Presale Training - SUCCESS with model: $model");
-            return $result;
+        $models = [$payload['model']];
+        if ($with_fallback) {
+            $models = array_merge($models, self::get_roleplay_fallback_models());
         }
 
-        $error = $result['error'] ?? 'unknown error';
-        error_log("Presale Training - FAILED model '$model': $error");
+        foreach ($models as $model) {
+            $payload_copy = $payload;
+            $payload_copy['model'] = $model;
+            if (!isset($payload_copy['max_tokens'])) {
+                $payload_copy['max_tokens'] = 1200;
+            }
+
+            $result = self::do_openrouter_request($payload_copy, $api_key);
+            if (isset($result['message'])) {
+                return $result;
+            }
+        }
+
+        return ['error' => 'All models failed. Check error log.'];
     }
-
-    return ['error' => 'All models failed. Check error log.'];
-}
-
-    // ====================== HANDLERS ======================
 
     public static function handle_start_request() {
         $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock (Elementor/JetEngine based products).\n"
@@ -147,7 +133,7 @@ class Presale_Training_MVP {
                 ['role' => 'user', 'content' => $scenario_prompt]
             ],
             'temperature' => 0.85,
-            'max_tokens'  => 700,
+            'max_tokens' => 700,
         ], true);
 
         if (isset($response['error'])) {
@@ -158,7 +144,7 @@ class Presale_Training_MVP {
 
         return rest_ensure_response([
             'scenario' => $scenario,
-            'raw'      => $response['message']
+            'raw' => $response['message']
         ]);
     }
 
@@ -170,8 +156,8 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'messages must be an array'], 400);
         }
 
-        $scenario_text = is_array($scenario) 
-            ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE) 
+        $scenario_text = is_array($scenario)
+            ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
             : (string) $scenario;
 
         $system_prompt = "You are acting as a realistic potential customer interested in Crocoblock products.\n\n"
@@ -184,6 +170,8 @@ class Presale_Training_MVP {
             . "- avoid sounding like AI\n"
             . "- sometimes give vague answers\n"
             . "- express doubts naturally\n\n"
+            . "Always reply in English only.\n\n"
+            . "Always reply in English only.\n\n"
             . "Current scenario:\n" . $scenario_text;
 
         $payload_messages = array_merge([
@@ -206,10 +194,67 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'messages must be a non-empty array'], 400);
         }
 
-        $eval_prompt = "You are evaluating a presale agent.\n\n"
-            . "Analyze the conversation and provide scores (1-10) for:\n"
-            . "- clarity, empathy, discovery, objection handling, sales communication.\n"
-            . "Then give strengths, weaknesses, missed opportunities and suggestions.";
+        $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Your purpose is to analyze chat conversations or tickets between a support agent and a prospective client, evaluate the agent's performance based on Crocoblock's proprietary presale methodology, and provide highly structured, constructive feedback.
+
+### CORE PRESALE PHILOSOPHY
+The agent must act as a Solution Architect and Consultant, not a static information directory. The goal is to guide clients toward the right choice, demonstrate the business value of the ecosystem, and confidently lead the conversation toward a conversion using logic, empathy, and clear architectural solutions.
+
+### RULES THE AGENT MUST FOLLOW:
+1. **Prioritize Discovery First**: The agent must ask clear, open-ended clarifying questions to understand the client's business goals, target workflows, or reference designs before recommending specific products.
+2. **Apply "Outcome vs Feature" (Handling Feature Gaps)**: If a specific feature is missing out-of-the-box (e.g., an auction system), the agent must never give a flat "no". Instead, focus on the client's final objective. Explain how the ecosystem can solve the problem by using JetEngine as the core database backbone (Custom Post Types, Meta Fields, Listings, and Relations) combined with other tools (like JetFormBuilder for input validation or third-party solutions).
+3. **Recommend Power Pairs & Bundles**: Group plugins into logical business scenarios tailored to the client's industry niche (e.g., combining JetEngine + JetBooking + JetSmartFilters for a rental platform). Build clear functional value before displaying prices.
+4. **Personalization & Social Proof**: Tailor every argument to the client's exact use case. Reference external validation when helpful, such as customer feedback trends on Trustpilot or Google reviews, to establish corporate trust.
+5. **Implement the 7-Element Conversion Checklist**: In pitches, structural proposals, or follow-up interactions, the agent should actively integrate the following elements:
+   - **Upsell / Cross-sell**: Compare separate plugin expenses with the All-Inclusive plan, demonstrating clear financial advantages (e.g., showing the mathematical breakdown of separate costs vs. the bundle).
+   - **Clear Pricing & Totals**: Display explicit calculations and absolute numbers so the client clearly understands the savings.
+   - **Subtle FOMO**: Gently remind the client about active seasonal promotional timelines or standard intervals between discounts, avoiding aggressive or high-pressure tactics.
+   - **Direct Call to Action (CTA)**: Provide precise, direct links to pricing tables, checkouts, or specific cart layouts rather than general homepages.
+   - **Risk Reversal**: Highlight the 30-day money-back guarantee to lower purchase friction and remove the fear of making a wrong choice.
+   - **Support Team Value**: Emphasize access to 24/7 dedicated assistance, positioning it as an expert team backing their development journey.
+   - **Defined Next Steps**: Maintain momentum by defining clear follow-up actions, such as offering a real-time technical consultation or booking a brief call.
+
+### EVALUATION SCORING CRITERIA
+Evaluate the interaction on a scale from 0% to 100% across these key dimensions:
+- **Requirements Gathering & Discovery**: Did the agent investigate the project depth before selling?
+- **Solution Architecture & Problem Solving**: Did the agent apply the "Outcome vs Feature" approach and connect plugins logically?
+- **Value Building & Commercial Clarity**: Did the agent present clear math, compare separate purchases to the All-Inclusive option, and include risk reversal (refund policy, support)?
+- **Conversion Checklist Implementation**: How many of the 7 required conversion elements were naturally incorporated?
+- **Tone, Clarity & Formatting**: Was the tone warm, helpful, and natural? Were complex concepts simplified without overwhelming text dumps or heavy technical jargon?
+
+### PRACTICE EXAMPLES FOR CONTEXT
+
+*Bad Practice Examples:*
+- Immediately dropping plugin links or prices without asking what the client is building.
+- Telling a client "We don't support auctions, look elsewhere" instead of architecting a workaround with JetEngine.
+- Massive, unformatted text blocks detailing 20 different technical features at once.
+- Sending a follow-up that says "Just checking if you checked our site" without adding new value, pricing options, or a clear call to action.
+
+*Good Practice Examples:*
+- "To provide the most efficient setup, could you share a few details about your booking flow or a reference site you admire?"
+- Explaining that while a feature isn't plug-and-play, JetEngine handles the data structure (storing bidding history and timestamps) while JetFormBuilder processes frontend actions.
+- Showing clear price comparisons: "Purchasing these three plugins individually totals $225, whereas our All-Inclusive plan is currently $199, saving you money while unlocking all 21 tools."
+
+### EVALUATION OUTPUT FORMAT
+Analyze the provided text carefully and generate the review using this exact layout:
+
+**1. General Overview**
+[A brief, professional summary of the agent's interaction with the client]
+
+**2. Key Strengths**
+[Bullet points highlighting where the agent executed presale methodologies perfectly]
+
+**3. Opportunities for Improvement**
+[Constructive points identifying missed elements, missing checklist items, or technical jargon that could be simplified]
+
+**4. Scoring Matrix**
+- Discovery & Requirements Gathering: [X/100%]
+- Solution Architecture: [X/100%]
+- Commercial Pitch & Conversion Checklist: [X/100%]
+- Tone, Simplicity & Clarity: [X/100%]
+- **Overall Presale Score**: [Calculated Average %]
+
+**5. Corrected Response Blueprint**
+[Provide a rewritten version of the agent's final or primary message showing how it should look when incorporating all missing checklist elements and best practices seamlessly]";
 
         $response = self::openrouter_chat([
             'model' => self::get_eval_model(),
@@ -223,48 +268,46 @@ class Presale_Training_MVP {
         if (isset($response['message'])) {
             update_option(self::OPTION_LAST_RESULT, [
                 'created_at' => current_time('mysql'),
-                'feedback'   => $response['message'],
-                'messages'   => $messages,
+                'feedback' => $response['message'],
+                'messages' => $messages,
             ], false);
         }
 
         return rest_ensure_response($response);
     }
 
-    // ====================== HELPERS ======================
-
     private static function extract_scenario($text) {
         $scenario = self::try_parse_json_object($text);
-        if (is_array($scenario)) return $scenario;
-
-        if (preg_match('/\{.*\}/s', (string)$text, $matches)) {
-            $scenario = self::try_parse_json_object($matches[0]);
-            if (is_array($scenario)) return $scenario;
+        if (is_array($scenario)) {
+            return $scenario;
         }
 
-        // Fallback
+        if (preg_match('/\{.*\}/s', (string) $text, $matches)) {
+            $scenario = self::try_parse_json_object($matches[0]);
+            if (is_array($scenario)) {
+                return $scenario;
+            }
+        }
+
         return [
             'customer_type' => 'beginner WordPress user',
-            'mood'          => 'curious but cautious',
-            'use_case'      => 'wants to build a marketplace website',
-            'concerns'      => 'worried about complexity and budget',
-            'first_message' => 'Hi! I want to build a marketplace site with Crocoblock, but I\'m not sure how hard it will be. Can you help?',
+            'mood' => 'curious but cautious',
+            'use_case' => 'wants to build a marketplace website',
+            'concerns' => 'worried about complexity and budget',
+            'first_message' => 'Hi! I want to build a marketplace site with Crocoblock, but I am not sure how hard it will be. Can you help?',
         ];
     }
 
     private static function try_parse_json_object($text) {
-        $text = trim((string)$text);
-        $decoded = json_decode($text, true);
+        $decoded = json_decode(trim((string) $text), true);
         return is_array($decoded) ? $decoded : null;
     }
 
     private static function get_roleplay_fallback_models() {
-    $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 
-        'google/gemini-2.5-flash,openai/gpt-4o-mini,qwen/qwen2.5-32b-instruct:free');
-    
-    $models = array_filter(array_map('trim', explode(',', $raw)));
-    return array_values(array_unique($models));
-}
+        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'google/gemini-2.5-flash,openai/gpt-4o-mini,qwen/qwen2.5-32b-instruct:free');
+        $models = array_filter(array_map('trim', explode(',', $raw)));
+        return array_values(array_unique($models));
+    }
 
     private static function get_roleplay_model() {
         return get_option(self::OPTION_ROLEPLAY_MODEL, 'google/gemini-2.5-flash');
@@ -278,365 +321,220 @@ class Presale_Training_MVP {
         $api_key = esc_attr(get_option(self::OPTION_API_KEY, ''));
         $roleplay_model = esc_attr(self::get_roleplay_model());
         $eval_model = esc_attr(self::get_eval_model());
-        $fallback_models = esc_attr(get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash,openai/gpt-4.1-mini'));
+        $fallback_models = esc_attr(get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'google/gemini-2.5-flash,openai/gpt-4o-mini,qwen/qwen2.5-32b-instruct:free'));
         ?>
         <div class="wrap">
-            <h1>Presale Training — Settings</h1>
-            <form method="post" action="options.php" style="max-width: 820px; margin-top: 16px;">
+            <h1>Presale Training — Налаштування</h1>
+            <form method="post" action="options.php" style="max-width: 900px; margin-top: 16px;">
                 <?php settings_fields('presale_training_settings'); ?>
                 <table class="form-table" role="presentation">
                     <tr>
-                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_API_KEY); ?>">OpenRouter API Key</label></th>
+                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_API_KEY); ?>">Ключ OpenRouter API</label></th>
                         <td><input type="password" id="<?php echo esc_attr(self::OPTION_API_KEY); ?>" name="<?php echo esc_attr(self::OPTION_API_KEY); ?>" value="<?php echo $api_key; ?>" class="regular-text" /></td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>">Roleplay Model</label></th>
+                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>">Модель roleplay</label></th>
                         <td><input type="text" id="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>" name="<?php echo esc_attr(self::OPTION_ROLEPLAY_MODEL); ?>" value="<?php echo $roleplay_model; ?>" class="regular-text" /></td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>">Roleplay Fallback Models</label></th>
+                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>">Резервні моделі roleplay</label></th>
                         <td>
                             <input type="text" id="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>" name="<?php echo esc_attr(self::OPTION_ROLEPLAY_FALLBACK_MODELS); ?>" value="<?php echo $fallback_models; ?>" class="regular-text" />
-                            <p class="description">Comma-separated models used when roleplay model has no endpoint or is rate-limited.</p>
+                            <p class="description">Список моделей через кому, якщо основна модель недоступна.</p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_EVAL_MODEL); ?>">Evaluation Model</label></th>
+                        <th scope="row"><label for="<?php echo esc_attr(self::OPTION_EVAL_MODEL); ?>">Модель оцінювання</label></th>
                         <td><input type="text" id="<?php echo esc_attr(self::OPTION_EVAL_MODEL); ?>" name="<?php echo esc_attr(self::OPTION_EVAL_MODEL); ?>" value="<?php echo $eval_model; ?>" class="regular-text" /></td>
                     </tr>
                 </table>
-                <?php submit_button('Save Settings'); ?>
+                <?php submit_button('Зберегти налаштування'); ?>
             </form>
         </div>
         <?php
     }
 
     public static function render_results_page() {
-    global $wpdb;
-    $results = $wpdb->get_results("
-        SELECT * FROM {$wpdb->options} 
-        WHERE option_name LIKE 'presale_training_result_%' 
-        ORDER BY option_id DESC 
-        LIMIT 30
-    ");
-
-    ?>
-    <div class="wrap">
-        <h1>Presale Training — Результаты</h1>
-
-        <table class="wp-list-table widefat fixed striped">
-            <thead>
-                <tr>
-                    <th>Дата</th>
-                    <th>Пользователь</th>
-                    <th>Общий балл</th>
-                    <th>Clarity</th>
-                    <th>Empathy</th>
-                    <th>Discovery</th>
-                    <th>Objection</th>
-                    <th>Sales</th>
-                    <th>Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php if (empty($results)) : ?>
-                    <tr><td colspan="9">Пока нет оценённых разговоров.</td></tr>
-                <?php else : ?>
-                    <?php foreach ($results as $row) : 
-                        $data = unserialize($row->option_value); 
-                        $feedback = $data['feedback'] ?? '';
-                        // Парсим баллы (простой способ)
-                        preg_match_all('/(\w+).*?(\d+)\/10/', $feedback, $matches);
-                        $scores = array_combine($matches[1] ?? [], $matches[2] ?? []);
-                    ?>
-                    <tr>
-                        <td><?php echo esc_html($data['created_at']); ?></td>
-                        <td><?php echo wp_get_current_user()->display_name; ?></td>
-                        <td><strong><?php echo array_sum($scores) ?? '—'; ?>/50</strong></td>
-                        <td><?php echo $scores['Clarity'] ?? '—'; ?></td>
-                        <td><?php echo $scores['Empathy'] ?? '—'; ?></td>
-                        <td><?php echo $scores['Discovery'] ?? '—'; ?></td>
-                        <td><?php echo $scores['Objection'] ?? '—'; ?></td>
-                        <td><?php echo $scores['Sales'] ?? '—'; ?></td>
-                        <td>
-                            <button class="button view-details" data-feedback="<?php echo esc_attr($feedback); ?>">Подробно</button>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                <?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-
-    <script>
-    document.querySelectorAll('.view-details').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const feedback = btn.dataset.feedback;
-            alert(feedback); // позже можно сделать красивый модальный
-        });
-    });
-    </script>
-    <?php
-}
-
-public static function render_chat_page() {
-    ?>
-    <div class="wrap">
-        <h1>Presale Training — Chat</h1>
-        
-        <div id="presale-training-app" style="max-width: 1100px; margin: 20px 0; background: #fff; border: 1px solid #c3c4c7; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-
-            <!-- Header -->
-            <div style="padding: 16px 20px; background: #f6f7f7; border-bottom: 1px solid #c3c4c7; display: flex; justify-content: space-between; align-items: center;">
-                <button class="button" id="new-scenario-btn">Новый случайный сценарий</button>
-                <div id="scenario-box" style="flex: 1; margin: 0 20px; font-size: 14px; line-height: 1.5;"></div>
-            </div>
-
-            <!-- Chat Area -->
-            <div style="display: flex; height: 620px;">
-                
-                <!-- Messages -->
-                <div id="messages" style="
-                    flex: 1; 
-                    padding: 20px; 
-                    overflow-y: auto; 
-                    background: #f9f9f9; 
-                    border-right: 1px solid #c3c4c7;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 16px;
-                "></div>
-
-                <!-- Sidebar (optional: scenario info) -->
-                <div style="width: 280px; padding: 20px; background: #fff; border-left: 1px solid #c3c4c7; overflow-y: auto;">
-                    <h3 style="margin-top:0;">Инструкция агенту</h3>
-                    <small>Старайся:</small>
-                    <ul style="font-size:13px; line-height:1.4;">
-                        <li>Задавать уточняющие вопросы</li>
-                        <li>Работать с возражениями</li>
-                        <li>Связывать фичи с болью клиента</li>
-                        <li>Закрывать на следующий шаг</li>
-                    </ul>
-                </div>
-            </div>
-
-            <!-- Input Area -->
-            <div style="padding: 16px 20px; background: #f6f7f7; border-top: 1px solid #c3c4c7;">
-                <textarea id="agent-input" style="width:100%; min-height: 110px; resize: vertical; padding: 12px; font-size: 15px;" 
-                    placeholder="Напишите ответ как presale-агент..."></textarea>
-                
-                <div style="margin-top: 12px; display: flex; gap: 10px;">
-                    <button class="button button-primary" id="send-btn" style="padding: 8px 20px;">Отправить</button>
-                    <button class="button" id="evaluate-btn">Оценить разговор</button>
-                    <button class="button" id="reset-btn">Сбросить чат</button>
-                </div>
-            </div>
-
-            <!-- Evaluation -->
-            <div id="evaluation" style="padding: 20px; background: #f0f0f1; border-top: 1px solid #c3c4c7; white-space: pre-wrap; display: none;"></div>
+        $last_result = get_option(self::OPTION_LAST_RESULT, []);
+        ?>
+        <div class="wrap">
+            <h1>Presale Training — Результати</h1>
+            <?php if (empty($last_result)) : ?>
+                <p>Поки немає оцінених діалогів.</p>
+            <?php else : ?>
+                <p><strong>Дата:</strong> <?php echo esc_html($last_result['created_at'] ?? '—'); ?></p>
+                <h2>Зворотний зв’язок</h2>
+                <pre style="background:#fff; padding:12px; border:1px solid #dcdcde; white-space:pre-wrap;"><?php echo esc_html($last_result['feedback'] ?? ''); ?></pre>
+            <?php endif; ?>
         </div>
-    </div>
+        <?php
+    }
 
-    <script>
-    (function() {
-    const inputEl = document.getElementById('agent-input');
-    const evalEl = document.getElementById('evaluation');
-    const scenarioBoxEl = document.getElementById('scenario-box');
-    
-    const state = {
-        messages: [],
-        scenario: null,           // теперь храним объект, а не текст
-        isLoading: false
-    };
-    const messagesEl = document.getElementById('messages');
-        
-        function renderMessages() {
-            messagesEl.innerHTML = state.messages.map(m => {
-                const isCustomer = m.role === 'assistant';
-                return `
-                    <div style="max-width: 85%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
-                        <div style="font-size: 13px; color: #666; margin-bottom: 4px;">
-                            ${isCustomer ? '👤 Клиент' : '👨‍💼 Вы'}
-                        </div>
-                        <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; 
-                                    color: ${isCustomer ? '#000' : '#fff'}; 
-                                    padding: 14px 18px; 
-                                    border-radius: 12px; 
-                                    font-size: 15.5px; 
-                                    line-height: 1.45;">
-                            ${escapeHtml(m.content)}
+    public static function render_chat_page() {
+        ?>
+        <div class="wrap" style="height: calc(100vh - 70px);">
+            <h1>Presale Training — Чат</h1>
+
+            <div id="presale-training-app" style="display:flex; gap:16px; height: calc(100vh - 160px); min-height:650px;">
+                <div style="flex: 0 0 36%; background:#fff; border:1px solid #c3c4c7; border-radius:8px; padding:16px; display:flex; flex-direction:column;">
+                    <button class="button" id="new-scenario-btn" style="margin-bottom:12px;">Новий випадковий сценарій</button>
+                    <h3 style="margin:0 0 8px 0;">Сценарій</h3>
+                    <div id="scenario-box" style="flex:1; overflow:auto; background:#f6f7f7; border:1px solid #dcdcde; border-radius:6px; padding:12px; line-height:1.5;"></div>
+                    <h3 style="margin:12px 0 8px 0;">Оцінювання</h3>
+                    <pre id="evaluation" style="white-space:pre-wrap; max-height:34%; overflow:auto; background:#f0f0f1; border:1px solid #dcdcde; border-radius:6px; padding:12px;"></pre>
+                </div>
+                <div style="flex:1; background:#fff; border:1px solid #c3c4c7; border-radius:8px; display:flex; flex-direction:column; min-width:0;">
+                    <div id="messages" style="flex:1; overflow:auto; padding:20px; background:#f9f9f9; border-bottom:1px solid #c3c4c7; display:flex; flex-direction:column; gap:16px;"></div>
+                    <div style="padding:16px;">
+                        <textarea id="agent-input" style="width:100%; min-height:110px; resize:vertical; padding:12px; font-size:15px;" placeholder="Введіть відповідь як presale-агент..."></textarea>
+                        <div style="margin-top: 12px; display: flex; gap: 10px;">
+                            <button class="button button-primary" id="send-btn">Відправити</button>
+                            <button class="button" id="evaluate-btn">Оцінити розмову</button>
+                            <button class="button" id="reset-btn">Скинути чат</button>
                         </div>
                     </div>
-                `;
-            }).join('');
-            
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
+                </div>
+            </div>
+        </div>
 
-    function escapeHtml(str) {
-        return String(str || '').replace(/[&<>"']/g, t => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
-        }[t]));
-    }
+    <script>
+        (function() {
+            const inputEl = document.getElementById('agent-input');
+            const evalEl = document.getElementById('evaluation');
+            const scenarioBoxEl = document.getElementById('scenario-box');
+            const messagesEl = document.getElementById('messages');
 
-    function setLoading(isLoading) {
-        state.isLoading = isLoading;
-        const sendBtn = document.getElementById('send-btn');
-        const newBtn = document.getElementById('new-scenario-btn');
-        const evalBtn = document.getElementById('evaluate-btn');
-        
-        sendBtn.disabled = isLoading;
-        newBtn.disabled = isLoading;
-        evalBtn.disabled = isLoading;
-        
-        inputEl.disabled = isLoading;
-    }
+            const state = { messages: [], scenario: null, isLoading: false };
 
-    async function api(path, payload = {}) {
-        try {
-            const res = await fetch('<?php echo esc_url_raw(rest_url('training/v1/')); ?>' + path, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-WP-Nonce': '<?php echo esc_js(wp_create_nonce('wp_rest')); ?>'
-                },
-                body: JSON.stringify(payload)
-            });
-
-            if (!res.ok) {
-                throw new Error(`HTTP error! status: ${res.status}`);
+            function renderMessages() {
+                messagesEl.innerHTML = state.messages.map(m => {
+                    const isCustomer = m.role === 'assistant';
+                    return `
+                        <div style="max-width: 86%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
+                            <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? '👤 Клієнт' : '👨‍💼 Ви'}</div>
+                            <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; color: ${isCustomer ? '#000' : '#fff'}; padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45;">
+                                ${escapeHtml(m.content)}
+                            </div>
+                        </div>`;
+                }).join('');
+                messagesEl.scrollTop = messagesEl.scrollHeight;
             }
 
-            return await res.json();
-        } catch (err) {
-            console.error(err);
-            return { error: err.message || 'Ошибка соединения с сервером' };
-        }
-    }
-
-    async function loadScenario() {
-        setLoading(true);
-        scenarioBoxEl.innerHTML = '<em>Генерируем новый сценарий...</em>';
-        
-        try {
-            const data = await api('start');
-
-            if (data.error) {
-                scenarioBoxEl.innerHTML = `<span style="color:red;">Ошибка: ${escapeHtml(data.error)}</span>`;
-                return;
+            function escapeHtml(str) {
+                return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
             }
 
-            if (data.scenario) {
-                state.scenario = data.scenario;
-                
-                // Красивое отображение сценария
-                scenarioBoxEl.innerHTML = `
-                    <strong>Сценарий:</strong><br>
-                    <strong>Тип клиента:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
-                    <strong>Настроение:</strong> ${escapeHtml(data.scenario.mood)}<br>
-                    <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
-                    <strong>Главные опасения:</strong> ${escapeHtml(data.scenario.concerns)}
-                `;
+            function setLoading(isLoading) {
+                state.isLoading = isLoading;
+                document.getElementById('send-btn').disabled = isLoading;
+                document.getElementById('new-scenario-btn').disabled = isLoading;
+                document.getElementById('evaluate-btn').disabled = isLoading;
+                inputEl.disabled = isLoading;
+            }
 
-                // Начинаем диалог с первого сообщения клиента
-                state.messages = [{
-                    role: 'assistant',
-                    content: data.scenario.first_message || "Здравствуйте, я хотел бы узнать про Crocoblock..."
-                }];
-                
+            async function api(path, payload = {}) {
+                try {
+                    const res = await fetch('<?php echo esc_url_raw(rest_url('training/v1/')); ?>' + path, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-WP-Nonce': '<?php echo esc_js(wp_create_nonce('wp_rest')); ?>'
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    return await res.json();
+                } catch (err) {
+                    return { error: err.message || 'Помилка з’єднання із сервером' };
+                }
+            }
+
+            async function loadScenario() {
+                setLoading(true);
+                scenarioBoxEl.innerHTML = '<em>Генеруємо новий сценарій...</em>';
+                const data = await api('start');
+
+                if (data.error) {
+                    scenarioBoxEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error)}</span>`;
+                    setLoading(false);
+                    return;
+                }
+
+                if (data.scenario) {
+                    state.scenario = data.scenario;
+                    scenarioBoxEl.innerHTML = `
+                        <strong>Тип клієнта:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
+                        <strong>Настрій:</strong> ${escapeHtml(data.scenario.mood)}<br>
+                        <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
+                        <strong>Ключові побоювання:</strong> ${escapeHtml(data.scenario.concerns)}
+                    `;
+
+                    state.messages = [{
+                        role: 'assistant',
+                        content: data.scenario.first_message || 'Hi! Can you help me choose the right Crocoblock setup?'
+                    }];
+                    renderMessages();
+                }
+
+                setLoading(false);
+            }
+
+            async function sendMessage() {
+                const text = inputEl.value.trim();
+                if (!text || state.isLoading) return;
+
+                state.messages.push({ role: 'user', content: text });
+                inputEl.value = '';
                 renderMessages();
+                setLoading(true);
+
+                const data = await api('chat', { messages: state.messages, scenario: state.scenario });
+                if (data.message) {
+                    state.messages.push({ role: 'assistant', content: data.message });
+                } else {
+                    state.messages.push({ role: 'assistant', content: `[Error] ${data.error || 'Unknown error'}` });
+                }
+
+                renderMessages();
+                setLoading(false);
             }
-        } catch (e) {
-            scenarioBoxEl.innerHTML = '<span style="color:red;">Не удалось загрузить сценарий</span>';
-        } finally {
-            setLoading(false);
-        }
-    }
 
-    // === Обработчики ===
-    document.getElementById('send-btn').addEventListener('click', sendMessage);
-    
-    // Отправка по Enter (Shift+Enter = новая строка)
-    inputEl.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    async function sendMessage() {
-        const text = inputEl.value.trim();
-        if (!text || state.isLoading) return;
-
-        // Добавляем сообщение агента
-        state.messages.push({ role: 'user', content: text });
-        inputEl.value = '';
-        renderMessages();
-        setLoading(true);
-
-        try {
-            const data = await api('chat', { 
-                messages: state.messages, 
-                scenario: state.scenario 
+            document.getElementById('send-btn').addEventListener('click', sendMessage);
+            inputEl.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
             });
 
-            if (data.message) {
-                state.messages.push({ role: 'assistant', content: data.message });
-            } else if (data.error) {
-                state.messages.push({ 
-                    role: 'assistant', 
-                    content: `[Ошибка] ${data.error}` 
-                });
-            }
-        } catch (err) {
-            state.messages.push({ 
-                role: 'assistant', 
-                content: '[Ошибка соединения]' 
+            document.getElementById('evaluate-btn').addEventListener('click', async () => {
+                if (state.messages.length < 3) {
+                    evalEl.textContent = 'Діалог закороткий для оцінювання.';
+                    return;
+                }
+
+                setLoading(true);
+                evalEl.textContent = 'Аналізуємо розмову...';
+                const data = await api('evaluate', { messages: state.messages });
+                evalEl.textContent = data.message ? data.message : `Помилка: ${data.error || 'Unknown error'}`;
+                setLoading(false);
             });
-        } finally {
-            renderMessages();
-            setLoading(false);
-        }
-    }
 
-    document.getElementById('evaluate-btn').addEventListener('click', async () => {
-        if (state.messages.length < 3) {
-            evalEl.textContent = 'Слишком короткий диалог для оценки.';
-            return;
-        }
+            document.getElementById('reset-btn').addEventListener('click', () => {
+                state.messages = [];
+                evalEl.textContent = '';
+                renderMessages();
+            });
 
-        setLoading(true);
-        evalEl.textContent = 'Анализирую разговор...';
+            document.getElementById('new-scenario-btn').addEventListener('click', () => {
+                state.messages = [];
+                evalEl.textContent = '';
+                renderMessages();
+                loadScenario();
+            });
 
-        const data = await api('evaluate', { messages: state.messages });
-        
-        if (data.message) {
-            evalEl.textContent = data.message;
-        } else {
-            evalEl.textContent = data.error ? `Ошибка: ${data.error}` : JSON.stringify(data, null, 2);
-        }
-        
-        setLoading(false);
-    });
-
-    document.getElementById('reset-btn').addEventListener('click', () => {
-        state.messages = [];
-        evalEl.textContent = '';
-        renderMessages();
-    });
-
-    document.getElementById('new-scenario-btn').addEventListener('click', () => {
-        state.messages = [];
-        evalEl.textContent = '';
-        renderMessages();
-        loadScenario();
-    });
-
-    // Запуск
-    loadScenario();
-
-})();
-</script>
+            loadScenario();
+        })();
+        </script>
         <?php
     }
 }
