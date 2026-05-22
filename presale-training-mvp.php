@@ -2,10 +2,9 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.2.0
+ * Version: 0.2.1
  * Author: Team
  */
-
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -43,13 +42,11 @@ class Presale_Training_MVP {
             'permission_callback' => [__CLASS__, 'can_manage'],
             'callback' => [__CLASS__, 'handle_start_request'],
         ]);
-
         register_rest_route('training/v1', '/chat', [
             'methods' => 'POST',
             'permission_callback' => [__CLASS__, 'can_manage'],
             'callback' => [__CLASS__, 'handle_chat_request'],
         ]);
-
         register_rest_route('training/v1', '/evaluate', [
             'methods' => 'POST',
             'permission_callback' => [__CLASS__, 'can_manage'],
@@ -61,38 +58,111 @@ class Presale_Training_MVP {
         return current_user_can('manage_options');
     }
 
+    // ====================== API METHODS ======================
+
+    private static function do_openrouter_request($payload, $api_key) {
+        $url = 'https://openrouter.ai/api/v1/chat/completions';
+
+        $headers = [
+            'Authorization'      => 'Bearer ' . $api_key,
+            'Content-Type'       => 'application/json',
+            'HTTP-Referer'       => home_url(),
+            'X-OpenRouter-Title' => 'Presale Training Plugin',
+        ];
+
+        $response = wp_remote_post($url, [
+            'headers' => $headers,
+            'body'    => wp_json_encode($payload),
+            'timeout' => 60,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['error' => $response->get_error_message()];
+        }
+
+        $body = wp_remote_retrieve_body($response);
+        $code = wp_remote_retrieve_response_code($response);
+        $data = json_decode($body, true);
+
+        if ($code !== 200) {
+            $error_msg = $data['error']['message'] ?? $body ?? 'Unknown error';
+            return ['error' => "HTTP $code: $error_msg"];
+        }
+
+        if (empty($data['choices'][0]['message']['content'])) {
+            return ['error' => 'Empty response from model'];
+        }
+
+        return [
+            'message' => $data['choices'][0]['message']['content'],
+            'model'   => $data['model'] ?? $payload['model'],
+        ];
+    }
+
+    private static function openrouter_chat($payload, $with_fallback = false) {
+        $api_key = get_option(self::OPTION_API_KEY, '');
+        if (empty($api_key)) {
+            return ['error' => 'OpenRouter API key is not configured'];
+        }
+
+        $models = [$payload['model']];
+        if ($with_fallback) {
+            $models = array_merge($models, self::get_roleplay_fallback_models());
+        }
+
+        foreach ($models as $model) {
+            $payload['model'] = $model;
+            $result = self::do_openrouter_request($payload, $api_key);
+
+            if (isset($result['message'])) {
+                return $result;
+            }
+
+            error_log("Presale Training - Model failed: $model | " . ($result['error'] ?? 'unknown'));
+        }
+
+        return ['error' => 'All models failed. Check API key and model names.'];
+    }
+
+    // ====================== HANDLERS ======================
+
     public static function handle_start_request() {
-        $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock in JSON format with keys: customer_type, mood, use_case, concerns, first_message. "
-            . "Keep it concise and practical for roleplay.";
+        $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock (Elementor/JetEngine based products).\n"
+            . "Return ONLY valid JSON with these exact keys: customer_type, mood, use_case, concerns, first_message.\n"
+            . "No explanations, no markdown, no code blocks.";
 
         $response = self::openrouter_chat([
             'model' => self::get_roleplay_model(),
             'messages' => [
-                ['role' => 'system', 'content' => $scenario_prompt],
+                ['role' => 'user', 'content' => $scenario_prompt]
             ],
-            'temperature' => 0.9,
+            'temperature' => 0.85,
+            'max_tokens'  => 700,
         ], true);
 
-        if ($response instanceof WP_REST_Response) {
-            return $response;
+        if (isset($response['error'])) {
+            return new WP_REST_Response(['error' => $response['error']], 500);
         }
 
-        $scenario_text = $response['message'];
-        $scenario = self::extract_scenario($scenario_text);
+        $scenario = self::extract_scenario($response['message']);
 
         return rest_ensure_response([
-            'scenario_raw' => $scenario_text,
             'scenario' => $scenario,
+            'raw'      => $response['message']
         ]);
     }
 
     public static function handle_chat_request(WP_REST_Request $request) {
         $messages = $request->get_param('messages');
-        $scenario = (string) $request->get_param('scenario');
+        $scenario = $request->get_param('scenario'); // теперь объект
 
         if (!is_array($messages)) {
             return new WP_REST_Response(['error' => 'messages must be an array'], 400);
         }
+
+        $scenario_text = is_array($scenario) 
+            ? "Customer profile: " . wp_json_encode($scenario, JSON_UNESCAPED_UNICODE) 
+            : (string) $scenario;
 
         $system_prompt = "You are acting as a realistic potential customer interested in Crocoblock products.\n\n"
             . "Your behavior:\n"
@@ -104,9 +174,7 @@ class Presale_Training_MVP {
             . "- avoid sounding like AI\n"
             . "- sometimes give vague answers\n"
             . "- express doubts naturally\n\n"
-            . "You are NOT support.\n"
-            . "Your goal is to realistically simulate a presale conversation.\n\n"
-            . "Current scenario:\n" . sanitize_textarea_field($scenario);
+            . "Current scenario:\n" . $scenario_text;
 
         $payload_messages = array_merge([
             ['role' => 'system', 'content' => $system_prompt],
@@ -128,19 +196,7 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'messages must be a non-empty array'], 400);
         }
 
-        $eval_prompt = "You are evaluating a support presale agent.\n\n"
-            . "Analyze the conversation and provide:\n"
-            . "- clarity score (1-10)\n"
-            . "- empathy score (1-10)\n"
-            . "- discovery score (1-10)\n"
-            . "- objection handling score (1-10)\n"
-            . "- sales communication score (1-10)\n\n"
-            . "Then provide:\n"
-            . "- strengths\n"
-            . "- weaknesses\n"
-            . "- missed opportunities\n"
-            . "- improvement suggestions\n\n"
-            . "Be constructive and realistic.";
+        $eval_prompt = "You are evaluating a presale agent..."; // можно расширить позже
 
         $response = self::openrouter_chat([
             'model' => self::get_eval_model(),
@@ -149,151 +205,20 @@ class Presale_Training_MVP {
                 ['role' => 'user', 'content' => wp_json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)],
             ],
             'temperature' => 0.3,
-        ], true);
+        ], false);
 
-        if (!($response instanceof WP_REST_Response) && !empty($response['message'])) {
+        if (isset($response['message'])) {
             update_option(self::OPTION_LAST_RESULT, [
                 'created_at' => current_time('mysql'),
-                'feedback' => $response['message'],
-                'messages' => $messages,
+                'feedback'   => $response['message'],
+                'messages'   => $messages,
             ], false);
         }
 
         return rest_ensure_response($response);
     }
 
-private static function do_openrouter_request($payload, $api_key) {
-    $url = 'https://openrouter.ai/api/v1/chat/completions';
-
-    $headers = [
-        'Authorization' => 'Bearer ' . $api_key,
-        'Content-Type'  => 'application/json',
-        'HTTP-Referer'  => home_url(),           // важно для OpenRouter
-        'X-OpenRouter-Title' => 'Presale Training Plugin',
-    ];
-
-    $response = wp_remote_post($url, [
-        'headers' => $headers,
-        'body'    => wp_json_encode($payload),
-        'timeout' => 60,
-    ]);
-
-    if (is_wp_error($response)) {
-        return ['error' => $response->get_error_message()];
-    }
-
-    $body = wp_remote_retrieve_body($response);
-    $code = wp_remote_retrieve_response_code($response);
-    $data = json_decode($body, true);
-
-    if ($code !== 200) {
-        $error_msg = $data['error']['message'] ?? $body;
-        return ['error' => "HTTP $code: $error_msg"];
-    }
-
-    if (empty($data['choices'][0]['message']['content'])) {
-        return ['error' => 'Empty response from model'];
-    }
-
-    return [
-        'message' => $data['choices'][0]['message']['content'],
-        'model'   => $data['model'] ?? $payload['model'],
-        'usage'   => $data['usage'] ?? null,
-    ];
-}
-    
-private static function openrouter_chat($payload, $with_fallback = false) {
-    $api_key = get_option(self::OPTION_API_KEY, '');
-    if (empty($api_key)) {
-        return ['error' => 'OpenRouter API key is not configured'];
-    }
-
-    $models = [$payload['model']];
-    if ($with_fallback) {
-        $models = array_merge($models, self::get_roleplay_fallback_models());
-    }
-
-    foreach ($models as $model) {
-        $payload['model'] = $model;
-        $result = self::do_openrouter_request($payload, $api_key);
-
-        if (isset($result['message'])) {
-            return $result;
-        }
-
-        // Логируем ошибку (можно убрать позже)
-        error_log("Presale Training - Model failed: $model | " . ($result['error'] ?? 'unknown'));
-    }
-
-    return ['error' => 'All models failed. Check API key and model names.'];
-}
-// В методе handle_start_request измени обработку ответа:
-public static function handle_start_request() {
-    $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock (Elementor/JetEngine based products). 
-Return ONLY valid JSON with these exact keys: 
-customer_type, mood, use_case, concerns, first_message.
-No explanations, no markdown, no ```json.";
-
-    $response = self::openrouter_chat([
-        'model' => self::get_roleplay_model(),
-        'messages' => [
-            ['role' => 'user', 'content' => $scenario_prompt]
-        ],
-        'temperature' => 0.85,
-        'max_tokens'  => 600,
-    ], true);
-
-    if (isset($response['error'])) {
-        return new WP_REST_Response(['error' => $response['error']], 500);
-    }
-
-    $scenario = self::extract_scenario($response['message']);
-
-    return rest_ensure_response([
-        'scenario' => $scenario,
-        'raw'      => $response['message']
-    ]);
-}
-
-    private static function is_retryable_error($result) {
-        if (!($result instanceof WP_REST_Response)) {
-            return false;
-        }
-
-        $status = $result->get_status();
-        $data = $result->get_data();
-        $message = self::extract_error_message($data);
-
-        if ($status === 429) {
-            return true;
-        }
-
-        if (stripos($message, 'No endpoints found') !== false) {
-            return true;
-        }
-
-        if (stripos($message, 'rate-limited') !== false || stripos($message, 'rate limited') !== false) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static function extract_error_message($data) {
-        if (isset($data['error']['error']['message'])) {
-            return (string) $data['error']['error']['message'];
-        }
-
-        if (isset($data['error']['message'])) {
-            return (string) $data['error']['message'];
-        }
-
-        if (isset($data['message'])) {
-            return (string) $data['message'];
-        }
-
-        return '';
-    }
+    // ====================== HELPERS ======================
 
     private static function extract_scenario($text) {
         $scenario = self::try_parse_json_object($text);
@@ -301,40 +226,37 @@ No explanations, no markdown, no ```json.";
             return $scenario;
         }
 
-        if (preg_match('/\{.*\}/s', (string) $text, $matches)) {
+        if (preg_match('/\{.*\}/s', (string)$text, $matches)) {
             $scenario = self::try_parse_json_object($matches[0]);
             if (is_array($scenario)) {
                 return $scenario;
             }
         }
 
+        // Fallback
         return [
             'customer_type' => 'beginner WordPress user',
-            'mood' => 'curious but cautious',
-            'use_case' => 'wants to build a marketplace website',
-            'concerns' => 'worried about complexity and budget',
+            'mood'          => 'curious but cautious',
+            'use_case'      => 'wants to build a marketplace website',
+            'concerns'      => 'worried about complexity and budget',
             'first_message' => 'Hi! I want to build a marketplace site, but I am not sure how hard it will be. Can you help?',
         ];
     }
 
     private static function try_parse_json_object($text) {
-        $text = trim((string) $text);
+        $text = trim((string)$text);
         $decoded = json_decode($text, true);
-        if (is_array($decoded)) {
-            return $decoded;
-        }
-
-        return null;
+        return is_array($decoded) ? $decoded : null;
     }
 
     private static function get_roleplay_fallback_models() {
-        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash,openai/gpt-4.1-mini');
+        $raw = (string) get_option(self::OPTION_ROLEPLAY_FALLBACK_MODELS, 'mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.5-flash');
         $models = array_filter(array_map('trim', explode(',', $raw)));
         return array_values(array_unique($models));
     }
 
     private static function get_roleplay_model() {
-        return get_option(self::OPTION_ROLEPLAY_MODEL, 'meta-llama/llama-3.3-70b-instruct:free');
+        return get_option(self::OPTION_ROLEPLAY_MODEL, 'google/gemini-2.5-flash');
     }
 
     private static function get_eval_model() {
