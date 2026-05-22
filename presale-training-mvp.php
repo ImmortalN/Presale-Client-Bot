@@ -162,66 +162,48 @@ class Presale_Training_MVP {
         return rest_ensure_response($response);
     }
 
-    private static function openrouter_chat($payload, $with_fallback = false) {
-        $api_key = get_option(self::OPTION_API_KEY, '');
-        if (empty($api_key)) {
-            return new WP_REST_Response(['error' => 'OpenRouter API key is not configured'], 400);
-        }
-
-        $models = [$payload['model']];
-        if ($with_fallback) {
-            $models = array_merge($models, self::get_roleplay_fallback_models());
-        }
-
-        $last_result = null;
-        foreach ($models as $model) {
-            $payload['model'] = $model;
-            $result = self::do_openrouter_request($payload, $api_key);
-            $last_result = $result;
-
-            if (!($result instanceof WP_REST_Response)) {
-                return $result;
-            }
-
-            if (!self::is_retryable_error($result)) {
-                return $result;
-            }
-
-            sleep(1);
-        }
-
-        return $last_result;
+    // Замени свой метод openrouter_chat на этот
+private static function openrouter_chat($payload, $with_fallback = false) {
+    $api_key = get_option(self::OPTION_API_KEY, '');
+    if (empty($api_key)) {
+        return ['error' => 'OpenRouter API key is not configured'];
     }
 
-    private static function do_openrouter_request($payload, $api_key) {
-        $result = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $api_key,
-                'Content-Type' => 'application/json',
-                'HTTP-Referer' => home_url(),
-                'X-Title' => 'Presale Training MVP',
-            ],
-            'body' => wp_json_encode($payload),
-            'timeout' => 60,
-        ]);
-
-        if (is_wp_error($result)) {
-            return new WP_REST_Response(['error' => $result->get_error_message()], 500);
-        }
-
-        $status = wp_remote_retrieve_response_code($result);
-        $body = json_decode(wp_remote_retrieve_body($result), true);
-
-        if ($status >= 400) {
-            return new WP_REST_Response(['error' => $body], $status);
-        }
-
-        return [
-            'message' => $body['choices'][0]['message']['content'] ?? '',
-            'raw' => $body,
-            'model' => $payload['model'],
-        ];
+    $models = [$payload['model']];
+    if ($with_fallback) {
+        $models = array_merge($models, self::get_roleplay_fallback_models());
     }
+
+    foreach ($models as $model) {
+        $payload['model'] = $model;
+        $result = self::do_openrouter_request($payload, $api_key);
+
+        if (isset($result['message'])) {
+            return $result; // Успех
+        }
+        // Если ошибка, пробуем следующий по списку (fallback)
+    }
+
+    return ['error' => 'All models failed or returned no data.'];
+}
+
+// В методе handle_start_request измени обработку ответа:
+public static function handle_start_request() {
+    $scenario_prompt = "Generate a JSON-only response for a presale scenario with these keys: customer_type, mood, use_case, concerns, first_message. Do not add any text before or after the JSON.";
+
+    $response = self::openrouter_chat([
+        'model' => self::get_roleplay_model(),
+        'messages' => [['role' => 'system', 'content' => $scenario_prompt]],
+        'temperature' => 0.9,
+    ], true);
+
+    if (isset($response['error'])) {
+        return new WP_REST_Response($response, 500);
+    }
+
+    $scenario = self::extract_scenario($response['message']);
+    return rest_ensure_response(['scenario' => $scenario]);
+}
 
     private static function is_retryable_error($result) {
         if (!($result instanceof WP_REST_Response)) {
