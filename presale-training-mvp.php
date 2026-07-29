@@ -21,6 +21,8 @@ class Presale_Training_MVP {
         add_action('admin_menu', [__CLASS__, 'register_admin_pages']);
         add_action('admin_init', [__CLASS__, 'register_settings']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
+        add_shortcode('presale_training', [__CLASS__, 'render_shortcode']);
+        add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_frontend_assets']);
     }
 
     public static function activate() {
@@ -71,17 +73,17 @@ class Presale_Training_MVP {
     public static function register_rest_routes() {
         register_rest_route('training/v1', '/start', [
             'methods'             => 'POST',
-            'permission_callback' => [__CLASS__, 'can_manage'],
+            'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'handle_start_request'],
         ]);
         register_rest_route('training/v1', '/chat', [
             'methods'             => 'POST',
-            'permission_callback' => [__CLASS__, 'can_manage'],
+            'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'handle_chat_request'],
         ]);
         register_rest_route('training/v1', '/evaluate', [
             'methods'             => 'POST',
-            'permission_callback' => [__CLASS__, 'can_manage'],
+            'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'handle_evaluate_request'],
         ]);
     }
@@ -502,21 +504,25 @@ Analyze the provided text carefully and generate the review using this exact lay
                                 <td colspan="9">
                                     <div style="padding:16px 12px;">
                                         <?php if (!empty($row->scenario_summary)) : ?>
-                                            <h4 style="margin:0 0 8px;">Сценарій</h4>
-                                            <pre style="background:#fff; padding:12px; border:1px solid #dcdcde; white-space:pre-wrap; margin-bottom:16px; font-size:13px;"><?php
-                                                $scenario = json_decode($row->scenario_summary, true);
-                                                if (is_array($scenario)) {
-                                                    echo esc_html(
-                                                        "Тип: " . ($scenario['customer_type'] ?? '—') . "\n" .
-                                                        "Настрій: " . ($scenario['mood'] ?? '—') . "\n" .
-                                                        "Кейс: " . ($scenario['use_case'] ?? '—') . "\n" .
-                                                        "Побоювання: " . ($scenario['concerns'] ?? '—')
-                                                    );
-                                                } else {
-                                                    echo esc_html($row->scenario_summary);
-                                                }
-                                            ?></pre>
-                                        <?php endif; ?>
+    <h4 style="margin:0 0 8px;">Сценарій</h4>
+    <pre style="background:#fff; padding:12px; border:1px solid #dcdcde; white-space:pre-wrap; margin-bottom:16px; font-size:13px;"><?php
+        $scenario = json_decode($row->scenario_summary, true);
+        if (is_array($scenario)) {
+            $concerns = $scenario['concerns'] ?? '—';
+            if (is_array($concerns)) {
+                $concerns = implode(', ', $concerns);
+            }
+            echo esc_html(
+                "Тип: " . ($scenario['customer_type'] ?? '—') . "\n" .
+                "Настрій: " . ($scenario['mood'] ?? '—') . "\n" .
+                "Кейс: " . ($scenario['use_case'] ?? '—') . "\n" .
+                "Побоювання: " . $concerns
+            );
+        } else {
+            echo esc_html(is_string($row->scenario_summary) ? $row->scenario_summary : '—');
+        }
+    ?></pre>
+<?php endif; ?>
 
                                         <h4 style="margin:0 0 8px;">Повний зворотний зв’язок</h4>
                                         <pre style="background:#fff; padding:14px; border:1px solid #dcdcde; white-space:pre-wrap; max-height:420px; overflow:auto; font-size:13.5px; line-height:1.45;"><?php echo esc_html($row->feedback); ?></pre>
@@ -803,6 +809,350 @@ Analyze the provided text carefully and generate the review using this exact lay
                     evalEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error || 'Unknown error')}</span>`;
                 }
 
+                setLoading(false);
+            });
+
+            document.getElementById('reset-btn').addEventListener('click', () => {
+                state.messages = [];
+                evalEl.innerHTML = '';
+                renderMessages();
+            });
+
+            document.getElementById('new-scenario-btn').addEventListener('click', () => {
+                state.messages = [];
+                evalEl.innerHTML = '';
+                renderMessages();
+                loadScenario();
+            });
+
+            loadScenario();
+        })();
+        </script>
+        <?php
+    }
+
+        /* ============================================================
+     * FRONTEND (шорткод + стилі)
+     * ============================================================ */
+
+    public static function enqueue_frontend_assets() {
+        // Підключаємо стилі завжди (шорткод може бути на будь-якій сторінці)
+        wp_register_style('presale-training-front', false);
+        wp_enqueue_style('presale-training-front');
+        wp_add_inline_style('presale-training-front', self::get_frontend_css());
+    }
+
+    private static function get_frontend_css() {
+        return '
+        .presale-training-wrap { max-width: 1100px; margin: 30px auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        .presale-training-wrap * { box-sizing: border-box; }
+        .pt-password-box { max-width: 420px; margin: 80px auto; padding: 36px 32px; background: #fff; border: 1px solid #e0e0e0; border-radius: 14px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+        .pt-password-box h3 { margin: 0 0 8px; font-size: 22px; }
+        .pt-password-box p { color: #666; margin-bottom: 20px; }
+        .pt-password-box input { width: 100%; padding: 13px 14px; margin-bottom: 14px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; }
+        .pt-password-box button { width: 100%; background: #2271b1; color: #fff; border: none; padding: 13px; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 600; }
+        .pt-password-box button:hover { background: #135e96; }
+        .pt-error { color: #d63638; margin-bottom: 12px; font-size: 14px; }
+
+        .pt-agent-name { margin-bottom: 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .pt-agent-name label { font-weight: 600; white-space: nowrap; }
+        .pt-agent-name input { padding: 9px 12px; border: 1px solid #ccc; border-radius: 6px; width: 260px; font-size: 14px; }
+        .pt-agent-name-hint { color: #b32d2e; font-size: 13px; display: none; }
+
+        .pt-layout { display: flex; gap: 20px; min-height: 620px; }
+        .pt-sidebar { flex: 0 0 340px; background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 18px; display: flex; flex-direction: column; }
+        .pt-chat { flex: 1; background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; display: flex; flex-direction: column; min-width: 0; }
+        .pt-messages { flex: 1; overflow: auto; padding: 20px; background: #f7f8f9; display: flex; flex-direction: column; gap: 14px; border-radius: 12px 12px 0 0; }
+        .pt-input-area { padding: 16px; border-top: 1px solid #eee; }
+        .pt-input-area textarea { width: 100%; min-height: 90px; padding: 12px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; resize: vertical; font-family: inherit; }
+        .pt-buttons { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+        .pt-btn { padding: 10px 18px; border-radius: 6px; border: 1px solid #ccc; background: #f0f0f1; cursor: pointer; font-size: 14px; }
+        .pt-btn-primary { background: #2271b1; color: #fff; border-color: #2271b1; }
+        .pt-btn-primary:hover { background: #135e96; }
+        .pt-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        .pt-msg { max-width: 85%; }
+        .pt-msg-customer { align-self: flex-start; }
+        .pt-msg-agent { align-self: flex-end; }
+        .pt-msg-bubble { padding: 12px 16px; border-radius: 12px; font-size: 15px; line-height: 1.45; }
+        .pt-msg-customer .pt-msg-bubble { background: #fff; border: 1px solid #e2e2e2; }
+        .pt-msg-agent .pt-msg-bubble { background: #2271b1; color: #fff; }
+        .pt-msg-system { align-self: center; max-width: 92%; }
+        .pt-msg-system .pt-msg-bubble { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center; }
+        .pt-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+
+        .pt-scenario-box { flex: 1; overflow: auto; background: #f6f7f7; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.5; margin-bottom: 14px; }
+        .pt-eval-box { max-height: 280px; overflow: auto; background: #f0f0f1; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; font-size: 13px; }
+
+        .pt-sidebar h3 { margin: 0 0 8px; font-size: 15px; }
+        .pt-new-scenario { margin-bottom: 14px; width: 100%; }
+
+        @media (max-width: 860px) {
+            .pt-layout { flex-direction: column; }
+            .pt-sidebar { flex: none; }
+        }
+        ';
+    }
+
+    public static function render_shortcode($atts) {
+        $atts = shortcode_atts([
+            'password' => 'croc2026',
+        ], $atts, 'presale_training');
+
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        $passed = !empty($_SESSION['presale_training_auth']);
+        $error  = '';
+
+        if (!$passed && isset($_POST['presale_password'])) {
+            if (hash_equals($atts['password'], (string) $_POST['presale_password'])) {
+                $_SESSION['presale_training_auth'] = true;
+                $passed = true;
+            } else {
+                $error = 'Невірний пароль';
+            }
+        }
+
+        if (!$passed) {
+            ob_start();
+            ?>
+            <div class="presale-training-wrap">
+                <div class="pt-password-box">
+                    <h3>Presale Training</h3>
+                    <p>Введіть пароль для доступу</p>
+                    <?php if ($error) : ?>
+                        <div class="pt-error"><?php echo esc_html($error); ?></div>
+                    <?php endif; ?>
+                    <form method="post">
+                        <input type="password" name="presale_password" placeholder="Пароль" required autocomplete="current-password">
+                        <button type="submit">Увійти</button>
+                    </form>
+                </div>
+            </div>
+            <?php
+            return ob_get_clean();
+        }
+
+        ob_start();
+        self::render_frontend_chat();
+        return ob_get_clean();
+    }
+
+    public static function render_frontend_chat() {
+        $rest_url = esc_url_raw(rest_url('training/v1/'));
+        $nonce    = wp_create_nonce('wp_rest');
+        ?>
+        <div class="presale-training-wrap">
+            <div class="pt-agent-name">
+                <label for="agent-name-input">Ваш нік / Ім’я:</label>
+                <input type="text" id="agent-name-input" placeholder="Наприклад: Olena / Alex" />
+                <span id="agent-name-hint" class="pt-agent-name-hint">← обов’язково вкажіть нік перед оцінкою</span>
+            </div>
+
+            <div class="pt-layout">
+                <!-- Sidebar -->
+                <div class="pt-sidebar">
+                    <button class="pt-btn pt-new-scenario" id="new-scenario-btn">Новий випадковий сценарій</button>
+                    <h3>Сценарій</h3>
+                    <div id="scenario-box" class="pt-scenario-box"></div>
+                    <h3>Оцінювання</h3>
+                    <div id="evaluation" class="pt-eval-box"></div>
+                </div>
+
+                <!-- Chat -->
+                <div class="pt-chat">
+                    <div id="messages" class="pt-messages"></div>
+                    <div class="pt-input-area">
+                        <textarea id="agent-input" placeholder="Введіть відповідь як presale-агент..."></textarea>
+                        <div class="pt-buttons">
+                            <button class="pt-btn pt-btn-primary" id="send-btn">Відправити</button>
+                            <button class="pt-btn" id="evaluate-btn">Оцінити розмову</button>
+                            <button class="pt-btn" id="reset-btn">Скинути чат</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+        (function() {
+            const inputEl        = document.getElementById('agent-input');
+            const evalEl         = document.getElementById('evaluation');
+            const scenarioBoxEl  = document.getElementById('scenario-box');
+            const messagesEl     = document.getElementById('messages');
+            const agentNameInput = document.getElementById('agent-name-input');
+            const agentNameHint  = document.getElementById('agent-name-hint');
+
+            const savedName = localStorage.getItem('presale_agent_name') || '';
+            if (savedName) agentNameInput.value = savedName;
+
+            agentNameInput.addEventListener('input', function() {
+                localStorage.setItem('presale_agent_name', this.value.trim());
+                agentNameHint.style.display = 'none';
+            });
+
+            const state = { messages: [], scenario: null, isLoading: false };
+
+            function escapeHtml(str) {
+                return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
+            }
+
+            function renderMessages() {
+                messagesEl.innerHTML = state.messages.map(m => {
+                    if (m.role === 'system') {
+                        return `<div class="pt-msg pt-msg-system"><div class="pt-msg-bubble"><strong>⚡ Система:</strong> ${escapeHtml(m.content)}</div></div>`;
+                    }
+                    const isCustomer = m.role === 'assistant';
+                    return `
+                        <div class="pt-msg ${isCustomer ? 'pt-msg-customer' : 'pt-msg-agent'}">
+                            <div class="pt-label">${isCustomer ? 'Клієнт' : 'Ви'}</div>
+                            <div class="pt-msg-bubble">${escapeHtml(m.content)}</div>
+                        </div>`;
+                }).join('');
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+
+            function setLoading(isLoading) {
+                state.isLoading = isLoading;
+                ['send-btn', 'new-scenario-btn', 'evaluate-btn'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.disabled = isLoading;
+                });
+                inputEl.disabled = isLoading;
+            }
+
+            function renderScores(scores, feedback) {
+                if (!scores) {
+                    evalEl.innerHTML = `<pre style="white-space:pre-wrap;margin:0;font-size:13px;">${escapeHtml(feedback)}</pre>`;
+                    return;
+                }
+                const overall = scores.overall;
+                let color = '#666';
+                if (overall !== null) {
+                    if (overall >= 80) color = '#00a32a';
+                    else if (overall >= 60) color = '#dba617';
+                    else color = '#d63638';
+                }
+                const row = (label, val) => `
+                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #e5e5e5;">
+                        <span>${label}</span><strong>${val !== null && val !== undefined ? val + '%' : '—'}</strong>
+                    </div>`;
+                evalEl.innerHTML = `
+                    <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:12px;">
+                        <div style="text-align:center;margin-bottom:10px;">
+                            <div style="font-size:12px;color:#666;">Загальний бал</div>
+                            <div style="font-size:28px;font-weight:700;color:${color};">${overall !== null ? overall + '%' : '—'}</div>
+                        </div>
+                        ${row('Discovery', scores.discovery)}
+                        ${row('Architecture', scores.architecture)}
+                        ${row('Commercial', scores.commercial)}
+                        ${row('Tone', scores.tone)}
+                    </div>
+                    <details open>
+                        <summary style="cursor:pointer;font-weight:600;margin-bottom:6px;">Повний фідбек</summary>
+                        <pre style="white-space:pre-wrap;margin:0;font-size:12.5px;line-height:1.45;">${escapeHtml(feedback)}</pre>
+                    </details>`;
+            }
+
+            async function api(path, payload = {}) {
+                try {
+                    const res = await fetch('<?php echo $rest_url; ?>' + path, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-WP-Nonce': '<?php echo esc_js($nonce); ?>'
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    return await res.json();
+                } catch (err) {
+                    return { error: err.message || 'Помилка з’єднання' };
+                }
+            }
+
+            async function loadScenario() {
+                setLoading(true);
+                scenarioBoxEl.innerHTML = '<em>Генеруємо новий сценарій...</em>';
+                evalEl.innerHTML = '';
+                const data = await api('start');
+                if (data.error) {
+                    scenarioBoxEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error)}</span>`;
+                    setLoading(false);
+                    return;
+                }
+                if (data.scenario) {
+                    state.scenario = data.scenario;
+                    const concerns = Array.isArray(data.scenario.concerns)
+                        ? data.scenario.concerns.join(', ')
+                        : (data.scenario.concerns || '—');
+                    scenarioBoxEl.innerHTML = `
+                        <strong>Тип клієнта:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
+                        <strong>Настрій:</strong> ${escapeHtml(data.scenario.mood)}<br>
+                        <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
+                        <strong>Побоювання:</strong> ${escapeHtml(concerns)}`;
+                    state.messages = [{
+                        role: 'assistant',
+                        content: data.scenario.first_message || 'Hi! Can you help me choose the right Crocoblock setup?'
+                    }];
+                    renderMessages();
+                }
+                setLoading(false);
+            }
+
+            async function sendMessage() {
+                const text = inputEl.value.trim();
+                if (!text || state.isLoading) return;
+                state.messages.push({ role: 'user', content: text });
+                inputEl.value = '';
+                renderMessages();
+                setLoading(true);
+
+                const data = await api('chat', { messages: state.messages, scenario: state.scenario });
+
+                if (data.force_followup && data.system_notice) {
+                    state.messages.push({ role: 'system', content: data.system_notice });
+                } else if (data.message) {
+                    state.messages.push({ role: 'assistant', content: data.message });
+                } else {
+                    state.messages.push({ role: 'assistant', content: `[Error] ${data.error || 'Unknown error'}` });
+                }
+                renderMessages();
+                setLoading(false);
+            }
+
+            document.getElementById('send-btn').addEventListener('click', sendMessage);
+            inputEl.addEventListener('keydown', e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+
+            document.getElementById('evaluate-btn').addEventListener('click', async () => {
+                const agentName = agentNameInput.value.trim();
+                if (!agentName) {
+                    agentNameHint.style.display = 'inline';
+                    agentNameInput.focus();
+                    return;
+                }
+                if (state.messages.length < 3) {
+                    evalEl.innerHTML = '<span style="color:#b32d2e;">Діалог закороткий для оцінювання.</span>';
+                    return;
+                }
+                setLoading(true);
+                evalEl.innerHTML = '<em>Аналізуємо розмову...</em>';
+                const data = await api('evaluate', {
+                    messages: state.messages,
+                    scenario: state.scenario,
+                    agent_name: agentName
+                });
+                if (data.message) {
+                    renderScores(data.scores || null, data.message);
+                } else {
+                    evalEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error || 'Unknown error')}</span>`;
+                }
                 setLoading(false);
             });
 
