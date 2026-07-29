@@ -141,7 +141,7 @@ class Presale_Training_MVP {
             $payload_copy = $payload;
             $payload_copy['model'] = $model;
             if (!isset($payload_copy['max_tokens'])) {
-                $payload_copy['max_tokens'] = 1200;
+                $payload_copy['max_tokens'] = 400;
             }
 
             $result = self::do_openrouter_request($payload_copy, $api_key);
