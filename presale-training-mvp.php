@@ -141,7 +141,7 @@ class Presale_Training_MVP {
             $payload_copy = $payload;
             $payload_copy['model'] = $model;
             if (!isset($payload_copy['max_tokens'])) {
-                $payload_copy['max_tokens'] = 400;
+                $payload_copy['max_tokens'] = 600;
             }
 
             $result = self::do_openrouter_request($payload_copy, $api_key);
@@ -162,7 +162,7 @@ class Presale_Training_MVP {
             'model'       => self::get_roleplay_model(),
             'messages'    => [['role' => 'user', 'content' => $scenario_prompt]],
             'temperature' => 0.85,
-            'max_tokens'  => 700,
+            'max_tokens'  => 350,
         ], true);
 
         if (isset($response['error'])) {
@@ -178,41 +178,59 @@ class Presale_Training_MVP {
     }
 
     public static function handle_chat_request(WP_REST_Request $request) {
-        $messages = $request->get_param('messages');
-        $scenario = $request->get_param('scenario');
+    $messages = $request->get_param('messages');
+    $scenario = $request->get_param('scenario');
 
-        if (!is_array($messages)) {
-            return new WP_REST_Response(['error' => 'messages must be an array'], 400);
-        }
-
-        $scenario_text = is_array($scenario)
-            ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
-            : (string) $scenario;
-
-        $system_prompt = "You are a realistic potential customer interested in Crocoblock products (JetEngine, JetFormBuilder, JetBooking etc.).\n\n"
-            . "Rules of behavior:\n"
-            . "- Keep every reply SHORT (1–3 sentences max, preferably under 40 words).\n"
-            . "- Speak naturally, like a real person in a live chat. No corporate language.\n"
-            . "- Sometimes be a bit vague, ask clarifying questions, express mild doubts.\n"
-            . "- Occasionally mention competitors (Elementor Pro, ACF, custom code, other builders) but not aggressively.\n"
-            . "- Do NOT instantly agree or buy. Make the agent work a little.\n"
-            . "- After 5–7 exchanges, if the agent has given good value, start leaning toward “I need to think / can you send me a summary / follow-up?”.\n"
-            . "- Never sound like an AI.\n"
-            . "- Always reply in English only.\n\n"
-            . "Current scenario:\n" . $scenario_text;
-
-        $payload_messages = array_merge([
-            ['role' => 'system', 'content' => $system_prompt],
-        ], $messages);
-
-        $response = self::openrouter_chat([
-            'model'       => self::get_roleplay_model(),
-            'messages'    => $payload_messages,
-            'temperature' => 0.8,
-        ], true);
-
-        return rest_ensure_response($response);
+    if (!is_array($messages)) {
+        return new WP_REST_Response(['error' => 'messages must be an array'], 400);
     }
+
+    // Рахуємо, скільки разів агент уже відповідав
+    $agent_replies = 0;
+    foreach ($messages as $m) {
+        if (isset($m['role']) && $m['role'] === 'user') {
+            $agent_replies++;
+        }
+    }
+
+    // Після 6–8 відповідей агента — клієнт «пропадає»
+    if ($agent_replies >= 7) {
+        return rest_ensure_response([
+            'message' => null,
+            'system_notice' => 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок.',
+            'force_followup' => true,
+        ]);
+    }
+
+    $scenario_text = is_array($scenario)
+        ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
+        : (string) $scenario;
+
+    $system_prompt = "You are a realistic potential customer interested in Crocoblock products (JetEngine, JetFormBuilder, JetBooking etc.).\n\n"
+        . "Rules of behavior:\n"
+        . "- Keep every reply SHORT (1–3 sentences max, preferably under 40 words).\n"
+        . "- Always finish your sentence completely. Never stop mid-sentence or mid-word.\n"
+        . "- Speak naturally, like a real person in a live chat. No corporate language.\n"
+        . "- Sometimes be a bit vague, ask clarifying questions, express mild doubts.\n"
+        . "- Occasionally mention competitors (Elementor Pro, ACF, custom code, other builders) but not aggressively.\n"
+        . "- Do NOT instantly agree or buy. Make the agent work a little.\n"
+        . "- Never sound like an AI.\n"
+        . "- Always reply in English only.\n\n"
+        . "Current scenario:\n" . $scenario_text;
+
+    $payload_messages = array_merge([
+        ['role' => 'system', 'content' => $system_prompt],
+    ], $messages);
+
+    $response = self::openrouter_chat([
+        'model'       => self::get_roleplay_model(),
+        'messages'    => $payload_messages,
+        'temperature' => 0.75,
+        'max_tokens'  => 280,   // ← важливо: обмежуємо, щоб не обрізало
+    ], true);
+
+    return rest_ensure_response($response);
+}
 
     public static function handle_evaluate_request(WP_REST_Request $request) {
         $messages   = $request->get_param('messages');
@@ -595,18 +613,27 @@ Analyze the provided text carefully and generate the review using this exact lay
             const state = { messages: [], scenario: null, isLoading: false };
 
             function renderMessages() {
-                messagesEl.innerHTML = state.messages.map(m => {
-                    const isCustomer = m.role === 'assistant';
-                    return `
-                        <div style="max-width: 86%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
-                            <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? 'Клієнт' : 'Ви'}</div>
-                            <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; color: ${isCustomer ? '#000' : '#fff'}; padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45;">
-                                ${escapeHtml(m.content)}
-                            </div>
-                        </div>`;
-                }).join('');
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
+    messagesEl.innerHTML = state.messages.map(m => {
+        if (m.role === 'system') {
+            return `
+                <div style="max-width: 92%; align-self: center; text-align: center;">
+                    <div style="background: #fff3cd; color: #856404; border: 1px solid #ffeeba; padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height: 1.45;">
+                        <strong>⚡ Система:</strong> ${escapeHtml(m.content)}
+                    </div>
+                </div>`;
+        }
+
+        const isCustomer = m.role === 'assistant';
+        return `
+            <div style="max-width: 86%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
+                <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? 'Клієнт' : 'Ви'}</div>
+                <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; color: ${isCustomer ? '#000' : '#fff'}; padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45;">
+                    ${escapeHtml(m.content)}
+                </div>
+            </div>`;
+    }).join('');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
 
             function escapeHtml(str) {
                 return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
@@ -711,25 +738,34 @@ Analyze the provided text carefully and generate the review using this exact lay
             }
 
             async function sendMessage() {
-                const text = inputEl.value.trim();
-                if (!text || state.isLoading) return;
+    const text = inputEl.value.trim();
+    if (!text || state.isLoading) return;
 
-                state.messages.push({ role: 'user', content: text });
-                inputEl.value = '';
-                renderMessages();
-                setLoading(true);
+    state.messages.push({ role: 'user', content: text });
+    inputEl.value = '';
+    renderMessages();
+    setLoading(true);
 
-                const data = await api('chat', { messages: state.messages, scenario: state.scenario });
+    const data = await api('chat', { messages: state.messages, scenario: state.scenario });
 
-                if (data.message) {
-                    state.messages.push({ role: 'assistant', content: data.message });
-                } else {
-                    state.messages.push({ role: 'assistant', content: `[Error] ${data.error || 'Unknown error'}` });
-                }
+    if (data.force_followup && data.system_notice) {
+        // Спеціальне повідомлення від системи
+        state.messages.push({
+            role: 'system',
+            content: data.system_notice
+        });
+    } else if (data.message) {
+        state.messages.push({ role: 'assistant', content: data.message });
+    } else {
+        state.messages.push({
+            role: 'assistant',
+            content: `[Error] ${data.error || 'Unknown error'}`
+        });
+    }
 
-                renderMessages();
-                setLoading(false);
-            }
+    renderMessages();
+    setLoading(false);
+}
 
             document.getElementById('send-btn').addEventListener('click', sendMessage);
             inputEl.addEventListener('keydown', (e) => {
