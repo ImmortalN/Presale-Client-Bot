@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.2.3
+ * Version: 0.3.0
  * Author: Team
  */
 
@@ -14,13 +14,43 @@ class Presale_Training_MVP {
     const OPTION_API_KEY = 'presale_training_openrouter_api_key';
     const OPTION_ROLEPLAY_MODEL = 'presale_training_roleplay_model';
     const OPTION_EVAL_MODEL = 'presale_training_eval_model';
-    const OPTION_LAST_RESULT = 'presale_training_last_result';
     const OPTION_ROLEPLAY_FALLBACK_MODELS = 'presale_training_roleplay_fallback_models';
 
     public static function init() {
         add_action('admin_menu', [__CLASS__, 'register_admin_pages']);
         add_action('admin_init', [__CLASS__, 'register_settings']);
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
+    }
+
+    public static function activate() {
+        self::create_table();
+    }
+
+    private static function create_table() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'presale_training_results';
+        $charset = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE $table (
+            id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            user_id bigint(20) unsigned NOT NULL,
+            agent_name varchar(100) NOT NULL,
+            scenario_summary text,
+            overall_score tinyint unsigned DEFAULT NULL,
+            discovery_score tinyint unsigned DEFAULT NULL,
+            architecture_score tinyint unsigned DEFAULT NULL,
+            commercial_score tinyint unsigned DEFAULT NULL,
+            tone_score tinyint unsigned DEFAULT NULL,
+            feedback longtext,
+            messages longtext,
+            created_at datetime NOT NULL,
+            PRIMARY KEY (id),
+            KEY user_id (user_id),
+            KEY created_at (created_at)
+        ) $charset;";
+
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        dbDelta($sql);
     }
 
     public static function register_admin_pages() {
@@ -171,7 +201,6 @@ class Presale_Training_MVP {
             . "- sometimes give vague answers\n"
             . "- express doubts naturally\n\n"
             . "Always reply in English only.\n\n"
-            . "Always reply in English only.\n\n"
             . "Current scenario:\n" . $scenario_text;
 
         $payload_messages = array_merge([
@@ -189,6 +218,7 @@ class Presale_Training_MVP {
 
     public static function handle_evaluate_request(WP_REST_Request $request) {
         $messages = $request->get_param('messages');
+        $scenario = $request->get_param('scenario');
 
         if (!is_array($messages) || empty($messages)) {
             return new WP_REST_Response(['error' => 'messages must be a non-empty array'], 400);
@@ -201,7 +231,7 @@ The agent must act as a Solution Architect and Consultant, not a static informat
 
 ### RULES THE AGENT MUST FOLLOW:
 1. **Prioritize Discovery First**: The agent must ask clear, open-ended clarifying questions to understand the client's business goals, target workflows, or reference designs before recommending specific products.
-2. **Apply "Outcome vs Feature" (Handling Feature Gaps)**: If a specific feature is missing out-of-the-box (e.g., an auction system), the agent must never give a flat "no". Instead, focus on the client's final objective. Explain how the ecosystem can solve the problem by using JetEngine as the core database backbone (Custom Post Types, Meta Fields, Listings, and Relations) combined with other tools (like JetFormBuilder for input validation or third-party solutions).
+2. **Apply \"Outcome vs Feature\" (Handling Feature Gaps)**: If a specific feature is missing out-of-the-box (e.g., an auction system), the agent must never give a flat \"no\". Instead, focus on the client's final objective. Explain how the ecosystem can solve the problem by using JetEngine as the core database backbone (Custom Post Types, Meta Fields, Listings, and Relations) combined with other tools (like JetFormBuilder for input validation or third-party solutions).
 3. **Recommend Power Pairs & Bundles**: Group plugins into logical business scenarios tailored to the client's industry niche (e.g., combining JetEngine + JetBooking + JetSmartFilters for a rental platform). Build clear functional value before displaying prices.
 4. **Personalization & Social Proof**: Tailor every argument to the client's exact use case. Reference external validation when helpful, such as customer feedback trends on Trustpilot or Google reviews, to establish corporate trust.
 5. **Implement the 7-Element Conversion Checklist**: In pitches, structural proposals, or follow-up interactions, the agent should actively integrate the following elements:
@@ -216,23 +246,10 @@ The agent must act as a Solution Architect and Consultant, not a static informat
 ### EVALUATION SCORING CRITERIA
 Evaluate the interaction on a scale from 0% to 100% across these key dimensions:
 - **Requirements Gathering & Discovery**: Did the agent investigate the project depth before selling?
-- **Solution Architecture & Problem Solving**: Did the agent apply the "Outcome vs Feature" approach and connect plugins logically?
+- **Solution Architecture & Problem Solving**: Did the agent apply the \"Outcome vs Feature\" approach and connect plugins logically?
 - **Value Building & Commercial Clarity**: Did the agent present clear math, compare separate purchases to the All-Inclusive option, and include risk reversal (refund policy, support)?
 - **Conversion Checklist Implementation**: How many of the 7 required conversion elements were naturally incorporated?
 - **Tone, Clarity & Formatting**: Was the tone warm, helpful, and natural? Were complex concepts simplified without overwhelming text dumps or heavy technical jargon?
-
-### PRACTICE EXAMPLES FOR CONTEXT
-
-*Bad Practice Examples:*
-- Immediately dropping plugin links or prices without asking what the client is building.
-- Telling a client "We don't support auctions, look elsewhere" instead of architecting a workaround with JetEngine.
-- Massive, unformatted text blocks detailing 20 different technical features at once.
-- Sending a follow-up that says "Just checking if you checked our site" without adding new value, pricing options, or a clear call to action.
-
-*Good Practice Examples:*
-- "To provide the most efficient setup, could you share a few details about your booking flow or a reference site you admire?"
-- Explaining that while a feature isn't plug-and-play, JetEngine handles the data structure (storing bidding history and timestamps) while JetFormBuilder processes frontend actions.
-- Showing clear price comparisons: "Purchasing these three plugins individually totals $225, whereas our All-Inclusive plan is currently $199, saving you money while unlocking all 21 tools."
 
 ### EVALUATION OUTPUT FORMAT
 Analyze the provided text carefully and generate the review using this exact layout:
@@ -266,14 +283,48 @@ Analyze the provided text carefully and generate the review using this exact lay
         ], false);
 
         if (isset($response['message'])) {
-            update_option(self::OPTION_LAST_RESULT, [
+            global $wpdb;
+            $table_name = $wpdb->prefix . 'presale_training_results';
+
+            $current_admin = wp_get_current_user();
+            $agent_name = $current_admin->exists() ? $current_admin->display_name : 'Guest';
+            $admin_id = get_current_user_id();
+
+            $scenario_summary = is_array($scenario)
+                ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
+                : (string) $scenario;
+
+            $feedback_text = $response['message'];
+
+            $discovery_score = self::extract_score($feedback_text, 'Discovery');
+            $architecture_score = self::extract_score($feedback_text, 'Solution Architecture');
+            $commercial_score = self::extract_score($feedback_text, 'Commercial Pitch');
+            $tone_score = self::extract_score($feedback_text, 'Tone');
+            $overall_score = self::extract_score($feedback_text, 'Overall Presale Score');
+
+            $wpdb->insert($table_name, [
+                'user_id' => $admin_id,
+                'agent_name' => $agent_name,
+                'scenario_summary' => $scenario_summary,
+                'overall_score' => $overall_score,
+                'discovery_score' => $discovery_score,
+                'architecture_score' => $architecture_score,
+                'commercial_score' => $commercial_score,
+                'tone_score' => $tone_score,
+                'feedback' => $feedback_text,
+                'messages' => wp_json_encode($messages, JSON_UNESCAPED_UNICODE),
                 'created_at' => current_time('mysql'),
-                'feedback' => $response['message'],
-                'messages' => $messages,
-            ], false);
+            ], ['%d', '%s', '%s', '%d', '%d', '%d', '%d', '%d', '%s', '%s', '%s']);
         }
 
         return rest_ensure_response($response);
+    }
+
+    private static function extract_score($text, $key) {
+        if (preg_match('/' . preg_quote($key, '/') . '[^:]*:\s*\[?(\d+)(?:%|\/100%?)?\]?/ui', $text, $matches)) {
+            return min(100, max(0, intval($matches[1])));
+        }
+        return null;
     }
 
     private static function extract_scenario($text) {
@@ -355,16 +406,60 @@ Analyze the provided text carefully and generate the review using this exact lay
     }
 
     public static function render_results_page() {
-        $last_result = get_option(self::OPTION_LAST_RESULT, []);
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'presale_training_results';
+        $results = $wpdb->get_results("SELECT * FROM $table_name ORDER BY id DESC LIMIT 50");
         ?>
         <div class="wrap">
             <h1>Presale Training — Результати</h1>
-            <?php if (empty($last_result)) : ?>
-                <p>Поки немає оцінених діалогів.</p>
+            <?php if (empty($results)) : ?>
+                <p>Поки немає збережених результатів оцінювання.</p>
             <?php else : ?>
-                <p><strong>Дата:</strong> <?php echo esc_html($last_result['created_at'] ?? '—'); ?></p>
-                <h2>Зворотний зв’язок</h2>
-                <pre style="background:#fff; padding:12px; border:1px solid #dcdcde; white-space:pre-wrap;"><?php echo esc_html($last_result['feedback'] ?? ''); ?></pre>
+                <table class="wp-list-table widefat fixed striped" style="margin-top: 16px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 60px;">ID</th>
+                            <th>Дата</th>
+                            <th>Агент</th>
+                            <th style="width: 140px;">Загальний бал</th>
+                            <th style="width: 150px;">Дії</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($results as $row) : ?>
+                            <tr>
+                                <td><?php echo esc_html($row->id); ?></td>
+                                <td><?php echo esc_html($row->created_at); ?></td>
+                                <td><?php echo esc_html($row->agent_name); ?></td>
+                                <td><strong><?php echo esc_html($row->overall_score !== null ? $row->overall_score . '%' : '—'); ?></strong></td>
+                                <td>
+                                    <button type="button" class="button button-small toggle-feedback" data-target="feedback-<?php echo intval($row->id); ?>">Деталі</button>
+                                </td>
+                            </tr>
+                            <tr id="feedback-<?php echo intval($row->id); ?>" style="display: none; background: #fff;">
+                                <td colspan="5">
+                                    <div style="padding: 12px;">
+                                        <h4>Зворотний зв’язок:</h4>
+                                        <pre style="background:#f6f7f7; padding:12px; border:1px solid #dcdcde; white-space:pre-wrap;"><?php echo esc_html($row->feedback); ?></pre>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <script>
+                    document.addEventListener('DOMContentLoaded', function() {
+                        document.querySelectorAll('.toggle-feedback').forEach(function(btn) {
+                            btn.addEventListener('click', function() {
+                                const targetId = this.getAttribute('data-target');
+                                const row = document.getElementById(targetId);
+                                if (row) {
+                                    row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+                                }
+                            });
+                        });
+                    });
+                </script>
             <?php endif; ?>
         </div>
         <?php
@@ -411,7 +506,7 @@ Analyze the provided text carefully and generate the review using this exact lay
                     const isCustomer = m.role === 'assistant';
                     return `
                         <div style="max-width: 86%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
-                            <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? '👤 Клієнт' : '👨‍💼 Ви'}</div>
+                            <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? 'Клієнт' : 'Ви'}</div>
                             <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; color: ${isCustomer ? '#000' : '#fff'}; padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45;">
                                 ${escapeHtml(m.content)}
                             </div>
@@ -514,7 +609,7 @@ Analyze the provided text carefully and generate the review using this exact lay
 
                 setLoading(true);
                 evalEl.textContent = 'Аналізуємо розмову...';
-                const data = await api('evaluate', { messages: state.messages });
+                const data = await api('evaluate', { messages: state.messages, scenario: state.scenario });
                 evalEl.textContent = data.message ? data.message : `Помилка: ${data.error || 'Unknown error'}`;
                 setLoading(false);
             });
@@ -539,4 +634,5 @@ Analyze the provided text carefully and generate the review using this exact lay
     }
 }
 
+register_activation_hook(__FILE__, ['Presale_Training_MVP', 'activate']);
 Presale_Training_MVP::init();
