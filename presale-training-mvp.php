@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.3.1
+ * Version: 0.4.0
  * Author: Team
  */
 
@@ -12,10 +12,13 @@ if (!defined('ABSPATH')) {
 
 class Presale_Training_MVP {
 
-    const OPTION_API_KEY                 = 'presale_training_openrouter_api_key';
-    const OPTION_ROLEPLAY_MODEL          = 'presale_training_roleplay_model';
-    const OPTION_EVAL_MODEL              = 'presale_training_eval_model';
+    const OPTION_API_KEY                  = 'presale_training_openrouter_api_key';
+    const OPTION_ROLEPLAY_MODEL           = 'presale_training_roleplay_model';
+    const OPTION_EVAL_MODEL               = 'presale_training_eval_model';
     const OPTION_ROLEPLAY_FALLBACK_MODELS = 'presale_training_roleplay_fallback_models';
+
+    /** Max client (assistant) messages before client "disappears" */
+    const MAX_CLIENT_MESSAGES = 5;
 
     public static function init() {
         add_action('admin_menu', [__CLASS__, 'register_admin_pages']);
@@ -95,13 +98,13 @@ class Presale_Training_MVP {
     private static function do_openrouter_request($payload, $api_key) {
         $response = wp_remote_post('https://openrouter.ai/api/v1/chat/completions', [
             'headers' => [
-                'Authorization'     => 'Bearer ' . $api_key,
-                'Content-Type'      => 'application/json',
-                'HTTP-Referer'      => home_url(),
-                'X-OpenRouter-Title'=> 'Presale Training Plugin',
+                'Authorization'      => 'Bearer ' . $api_key,
+                'Content-Type'       => 'application/json',
+                'HTTP-Referer'       => home_url(),
+                'X-OpenRouter-Title' => 'Presale Training Plugin',
             ],
             'body'    => wp_json_encode($payload),
-            'timeout' => 60,
+            'timeout' => 90,
         ]);
 
         if (is_wp_error($response)) {
@@ -139,6 +142,7 @@ class Presale_Training_MVP {
             $models = array_merge($models, self::get_roleplay_fallback_models());
         }
 
+        $last_error = 'All models failed. Check error log.';
         foreach ($models as $model) {
             $payload_copy = $payload;
             $payload_copy['model'] = $model;
@@ -150,21 +154,30 @@ class Presale_Training_MVP {
             if (isset($result['message'])) {
                 return $result;
             }
+            if (isset($result['error'])) {
+                $last_error = $result['error'];
+            }
         }
 
-        return ['error' => 'All models failed. Check error log.'];
+        return ['error' => $last_error];
     }
 
     public static function handle_start_request() {
-        $scenario_prompt = "Generate one realistic presale customer scenario for Crocoblock (Elementor/JetEngine based products).\n"
-            . "Return ONLY valid JSON with these exact keys: customer_type, mood, use_case, concerns, first_message.\n"
+        $scenario_prompt = "Generate ONE realistic presale customer scenario for Crocoblock (JetEngine, JetFormBuilder, JetBooking, JetSmartFilters, All-Inclusive plan, etc.).\n\n"
+            . "The customer should have a concrete project and natural reasons to discuss PRICING, plans (single plugins vs All-Inclusive), value, licensing, or comparisons — not only pure feature questions.\n\n"
+            . "Return ONLY valid JSON with these exact keys:\n"
+            . "- customer_type (string)\n"
+            . "- mood (string)\n"
+            . "- use_case (string, specific project)\n"
+            . "- concerns (string or array: budget, complexity, licensing, competitors, timeline…)\n"
+            . "- first_message (string: short, natural, 1–2 sentences, in English; should open room for discovery AND later commercial talk)\n\n"
             . "No explanations, no markdown, no code blocks.";
 
         $response = self::openrouter_chat([
             'model'       => self::get_roleplay_model(),
             'messages'    => [['role' => 'user', 'content' => $scenario_prompt]],
-            'temperature' => 0.85,
-            'max_tokens'  => 350,
+            'temperature' => 0.9,
+            'max_tokens'  => 400,
         ], true);
 
         if (isset($response['error'])) {
@@ -180,59 +193,86 @@ class Presale_Training_MVP {
     }
 
     public static function handle_chat_request(WP_REST_Request $request) {
-    $messages = $request->get_param('messages');
-    $scenario = $request->get_param('scenario');
+        $messages = $request->get_param('messages');
+        $scenario = $request->get_param('scenario');
 
-    if (!is_array($messages)) {
-        return new WP_REST_Response(['error' => 'messages must be an array'], 400);
-    }
-
-    // Рахуємо, скільки разів агент уже відповідав
-    $agent_replies = 0;
-    foreach ($messages as $m) {
-        if (isset($m['role']) && $m['role'] === 'user') {
-            $agent_replies++;
+        if (!is_array($messages)) {
+            return new WP_REST_Response(['error' => 'messages must be an array'], 400);
         }
+
+        // Count existing client messages (role = assistant)
+        $client_messages = 0;
+        foreach ($messages as $m) {
+            if (isset($m['role']) && $m['role'] === 'assistant') {
+                $client_messages++;
+            }
+        }
+
+        // After 5 client messages the client "disappears" — agent must write follow-up
+        if ($client_messages >= self::MAX_CLIENT_MESSAGES) {
+            return rest_ensure_response([
+                'message'        => null,
+                'system_notice'  => 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок (лінк на прайси / консультацію).',
+                'force_followup' => true,
+            ]);
+        }
+
+        $scenario_text = is_array($scenario)
+            ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
+            : (string) $scenario;
+
+        $system_prompt = "You are a REAL potential customer considering Crocoblock products (JetEngine, JetFormBuilder, JetBooking, JetSmartFilters, All-Inclusive subscription, etc.).\n\n"
+            . "CRITICAL ROLE RULES (never break them):\n"
+            . "- You are ONLY the customer. NEVER reply as a support agent, Crocoblock employee, or salesperson.\n"
+            . "- NEVER offer solutions, recommend plugins, give pricing advice, or sound helpful like support.\n"
+            . "- NEVER start sentences with \"I can help\", \"Let me recommend\", \"Based on your needs\" — that is agent language.\n"
+            . "- Speak as a real person who is buying / evaluating, not as an AI.\n\n"
+            . "Reply style:\n"
+            . "- Keep every reply SHORT: 1–3 sentences, preferably under 45 words.\n"
+            . "- Always finish your sentence completely.\n"
+            . "- Natural live-chat English only.\n"
+            . "- Be mildly skeptical or cautious; do not buy instantly.\n"
+            . "- Sometimes mention budget, price comparison, All-Inclusive vs single plugins, licensing, refund, competitors (Elementor Pro, ACF, custom code), or timeline.\n"
+            . "- Ask concrete questions that let the agent talk about value, pricing math, bundles, FOMO, guarantee, or next steps.\n"
+            . "- Vary your questions: features + commercial angles (cost, plan choice, worth it?, multi-site, promo).\n\n"
+            . "Current scenario (stay consistent with it):\n" . $scenario_text;
+
+        $payload_messages = array_merge([
+            ['role' => 'system', 'content' => $system_prompt],
+        ], $messages);
+
+        $response = self::openrouter_chat([
+            'model'       => self::get_roleplay_model(),
+            'messages'    => $payload_messages,
+            'temperature' => 0.75,
+            'max_tokens'  => 220,
+        ], true);
+
+        // Light post-filter: if model slipped into agent role, reject and force retry-friendly error
+        if (isset($response['message'])) {
+            $msg_lower = strtolower($response['message']);
+            $agent_phrases = [
+                'i can help you',
+                'let me recommend',
+                'based on your needs',
+                'i would suggest',
+                'our all-inclusive',
+                'you can purchase',
+                'here is the link',
+                'as a support',
+                'from crocoblock',
+            ];
+            foreach ($agent_phrases as $phrase) {
+                if (strpos($msg_lower, $phrase) !== false) {
+                    return rest_ensure_response([
+                        'error' => 'Role slip detected — please retry client reply.',
+                    ]);
+                }
+            }
+        }
+
+        return rest_ensure_response($response);
     }
-
-    // Після 6–8 відповідей агента — клієнт «пропадає»
-    if ($agent_replies >= 7) {
-        return rest_ensure_response([
-            'message' => null,
-            'system_notice' => 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок.',
-            'force_followup' => true,
-        ]);
-    }
-
-    $scenario_text = is_array($scenario)
-        ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
-        : (string) $scenario;
-
-    $system_prompt = "You are a realistic potential customer interested in Crocoblock products (JetEngine, JetFormBuilder, JetBooking etc.).\n\n"
-        . "Rules of behavior:\n"
-        . "- Keep every reply SHORT (1–3 sentences max, preferably under 40 words).\n"
-        . "- Always finish your sentence completely. Never stop mid-sentence or mid-word.\n"
-        . "- Speak naturally, like a real person in a live chat. No corporate language.\n"
-        . "- Sometimes be a bit vague, ask clarifying questions, express mild doubts.\n"
-        . "- Occasionally mention competitors (Elementor Pro, ACF, custom code, other builders) but not aggressively.\n"
-        . "- Do NOT instantly agree or buy. Make the agent work a little.\n"
-        . "- Never sound like an AI.\n"
-        . "- Always reply in English only.\n\n"
-        . "Current scenario:\n" . $scenario_text;
-
-    $payload_messages = array_merge([
-        ['role' => 'system', 'content' => $system_prompt],
-    ], $messages);
-
-    $response = self::openrouter_chat([
-        'model'       => self::get_roleplay_model(),
-        'messages'    => $payload_messages,
-        'temperature' => 0.75,
-        'max_tokens'  => 280,   // ← важливо: обмежуємо, щоб не обрізало
-    ], true);
-
-    return rest_ensure_response($response);
-}
 
     public static function handle_evaluate_request(WP_REST_Request $request) {
         $messages   = $request->get_param('messages');
@@ -247,74 +287,88 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'Будь ласка, вкажіть свій нік / ім’я агента'], 400);
         }
 
-        $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Your purpose is to analyze chat conversations or tickets between a support agent and a prospective client, evaluate the agent's performance based on Crocoblock's proprietary presale methodology, and provide highly structured, constructive feedback.
+        $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology.
 
 ### CORE PRESALE PHILOSOPHY
-The agent must act as a Solution Architect and Consultant, not a static information directory. The goal is to guide clients toward the right choice, demonstrate the business value of the ecosystem, and confidently lead the conversation toward a conversion using logic, empathy, and clear architectural solutions.
+The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and lead toward conversion with logic, empathy, and clear architecture.
 
-### RULES THE AGENT MUST FOLLOW:
-1. **Prioritize Discovery First**: The agent must ask clear, open-ended clarifying questions to understand the client's business goals, target workflows, or reference designs before recommending specific products.
-2. **Apply \"Outcome vs Feature\" (Handling Feature Gaps)**: If a specific feature is missing out-of-the-box (e.g., an auction system), the agent must never give a flat \"no\". Instead, focus on the client's final objective. Explain how the ecosystem can solve the problem by using JetEngine as the core database backbone (Custom Post Types, Meta Fields, Listings, and Relations) combined with other tools (like JetFormBuilder for input validation or third-party solutions).
-3. **Recommend Power Pairs & Bundles**: Group plugins into logical business scenarios tailored to the client's industry niche (e.g., combining JetEngine + JetBooking + JetSmartFilters for a rental platform). Build clear functional value before displaying prices.
-4. **Personalization & Social Proof**: Tailor every argument to the client's exact use case. Reference external validation when helpful, such as customer feedback trends on Trustpilot or Google reviews, to establish corporate trust.
-5. **Implement the 7-Element Conversion Checklist**: In pitches, structural proposals, or follow-up interactions, the agent should actively integrate the following elements:
-   - **Upsell / Cross-sell**: Compare separate plugin expenses with the All-Inclusive plan, demonstrating clear financial advantages (e.g., showing the mathematical breakdown of separate costs vs. the bundle).
-   - **Clear Pricing & Totals**: Display explicit calculations and absolute numbers so the client clearly understands the savings.
-   - **Subtle FOMO**: Gently remind the client about active seasonal promotional timelines or standard intervals between discounts, avoiding aggressive or high-pressure tactics.
-   - **Direct Call to Action (CTA)**: Provide precise, direct links to pricing tables, checkouts, or specific cart layouts rather than general homepages.
-   - **Risk Reversal**: Highlight the 30-day money-back guarantee to lower purchase friction and remove the fear of making a wrong choice.
-   - **Support Team Value**: Emphasize access to 24/7 dedicated assistance, positioning it as an expert team backing their development journey.
-   - **Defined Next Steps**: Maintain momentum by defining clear follow-up actions, such as offering a real-time technical consultation or booking a brief call.
+### RULES THE AGENT MUST FOLLOW
+1. Discovery first: open-ended clarifying questions about goals, workflows, niche before heavy product pitch.
+2. Outcome vs Feature: never flat \"no\"; map missing features to JetEngine + other tools solutions.
+3. Power pairs & bundles: group plugins by business scenario; build value before price.
+4. Personalization & social proof when natural.
+5. 7-Element Conversion Checklist (use when commercial moment appears):
+   - Upsell / Cross-sell (All-Inclusive vs separate)
+   - Clear pricing & totals (math)
+   - Subtle FOMO (promo timing)
+   - Direct CTA / links
+   - Risk reversal (30-day money-back)
+   - Support team value
+   - Defined next steps
 
-### EVALUATION SCORING CRITERIA
-Evaluate the interaction on a scale from 0% to 100% across these key dimensions:
-- **Requirements Gathering & Discovery**: Did the agent investigate the project depth before selling?
-- **Solution Architecture & Problem Solving**: Did the agent apply the \"Outcome vs Feature\" approach and connect plugins logically?
-- **Value Building & Commercial Clarity**: Did the agent present clear math, compare separate purchases to the All-Inclusive option, and include risk reversal (refund policy, support)?
-- **Conversion Checklist Implementation**: How many of the 7 required conversion elements were naturally incorporated?
-- **Tone, Clarity & Formatting**: Was the tone warm, helpful, and natural? Were complex concepts simplified without overwhelming text dumps or heavy technical jargon?
+### SCORING (0–100 integers only)
+- Discovery & Requirements Gathering
+- Solution Architecture
+- Commercial Pitch & Conversion Checklist
+- Tone, Simplicity & Clarity
+- Overall Presale Score = average of the four above (round to nearest integer)
 
-### EVALUATION OUTPUT FORMAT
-Analyze the provided text carefully and generate the review using this exact layout:
+### OUTPUT FORMAT — STRICT
+Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same line as the label so they can be parsed.
 
 **1. General Overview**
-[A brief, professional summary of the agent's interaction with the client]
+[2–4 sentences]
 
 **2. Key Strengths**
-[Bullet points highlighting where the agent executed presale methodologies perfectly]
+- ...
 
 **3. Opportunities for Improvement**
-[Constructive points identifying missed elements, missing checklist items, or technical jargon that could be simplified]
+- ...
 
 **4. Scoring Matrix**
-- Discovery & Requirements Gathering: [X/100%]
-- Solution Architecture: [X/100%]
-- Commercial Pitch & Conversion Checklist: [X/100%]
-- Tone, Simplicity & Clarity: [X/100%]
-- **Overall Presale Score**: [Calculated Average %]
+- Discovery & Requirements Gathering: XX%
+- Solution Architecture: XX%
+- Commercial Pitch & Conversion Checklist: XX%
+- Tone, Simplicity & Clarity: XX%
+- **Overall Presale Score**: XX%
 
 **5. Corrected Response Blueprint**
-[Provide a rewritten version of the agent's final or primary message showing how it should look when incorporating all missing checklist elements and best practices seamlessly]";
+[Rewritten example of a strong agent reply that includes missing checklist elements]";
+
+        $user_content = "SCENARIO:\n" . (is_array($scenario) ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : (string) $scenario)
+            . "\n\nCHAT MESSAGES (assistant = client, user = agent):\n"
+            . wp_json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 
         $response = self::openrouter_chat([
             'model'       => self::get_eval_model(),
             'messages'    => [
                 ['role' => 'system', 'content' => $eval_prompt],
-                ['role' => 'user', 'content' => wp_json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)],
+                ['role' => 'user', 'content' => $user_content],
             ],
-            'temperature' => 0.3,
+            'temperature' => 0.25,
+            'max_tokens'  => 1800,
         ], false);
 
         if (isset($response['message'])) {
             global $wpdb;
             $table_name = $wpdb->prefix . 'presale_training_results';
 
-            $feedback_text     = $response['message'];
-            $discovery_score   = self::extract_score($feedback_text, 'Discovery');
-            $architecture_score= self::extract_score($feedback_text, 'Solution Architecture');
-            $commercial_score  = self::extract_score($feedback_text, 'Commercial Pitch');
-            $tone_score        = self::extract_score($feedback_text, 'Tone');
-            $overall_score     = self::extract_score($feedback_text, 'Overall Presale Score');
+            $feedback_text      = $response['message'];
+            $discovery_score    = self::extract_score($feedback_text, 'Discovery');
+            $architecture_score = self::extract_score($feedback_text, 'Solution Architecture');
+            $commercial_score   = self::extract_score($feedback_text, 'Commercial Pitch');
+            $tone_score         = self::extract_score($feedback_text, 'Tone');
+            $overall_score      = self::extract_score($feedback_text, 'Overall Presale Score');
+
+            // Fallback: average of available scores if overall missing
+            if ($overall_score === null) {
+                $parts = array_filter([$discovery_score, $architecture_score, $commercial_score, $tone_score], function ($v) {
+                    return $v !== null;
+                });
+                if (count($parts) > 0) {
+                    $overall_score = (int) round(array_sum($parts) / count($parts));
+                }
+            }
 
             $scenario_summary = is_array($scenario)
                 ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE)
@@ -334,7 +388,6 @@ Analyze the provided text carefully and generate the review using this exact lay
                 'created_at'         => current_time('mysql'),
             ], ['%d', '%s', '%s', '%d', '%d', '%d', '%d', '%d', '%s', '%s', '%s']);
 
-            // Повертаємо скори окремо, щоб фронтенд міг їх красиво показати
             $response['scores'] = [
                 'overall'      => $overall_score,
                 'discovery'    => $discovery_score,
@@ -349,9 +402,9 @@ Analyze the provided text carefully and generate the review using this exact lay
 
     private static function extract_score($text, $key) {
         $patterns = [
-            '/' . preg_quote($key, '/') . '[^0-9]{0,40}?(\d{1,3})\s*%/ui',
-            '/' . preg_quote($key, '/') . '[^0-9]{0,40}?(\d{1,3})\s*\/\s*100/ui',
-            '/' . preg_quote($key, '/') . '.*?[\[\(]?\s*(\d{1,3})\s*[\]\)]?/ui',
+            '/' . preg_quote($key, '/') . '[^0-9%]{0,50}?(\d{1,3})\s*%/ui',
+            '/' . preg_quote($key, '/') . '[^0-9]{0,50}?(\d{1,3})\s*\/\s*100/ui',
+            '/' . preg_quote($key, '/') . '.*?[\[\(]?\s*(\d{1,3})\s*%?\s*[\]\)]?/ui',
         ];
 
         foreach ($patterns as $pattern) {
@@ -376,11 +429,11 @@ Analyze the provided text carefully and generate the review using this exact lay
         }
 
         return [
-            'customer_type' => 'beginner WordPress user',
-            'mood'          => 'curious but cautious',
-            'use_case'      => 'wants to build a marketplace website',
-            'concerns'      => 'worried about complexity and budget',
-            'first_message' => 'Hi! I want to build a marketplace site with Crocoblock, but I am not sure how hard it will be. Can you help?',
+            'customer_type' => 'freelance web designer',
+            'mood'          => 'interested but budget-conscious',
+            'use_case'      => 'building a directory + booking site for local services',
+            'concerns'      => 'price of All-Inclusive vs buying plugins separately, learning curve',
+            'first_message' => 'Hi! I need a directory with booking for local services. Is the All-Inclusive plan worth it or should I just get JetEngine + JetBooking?',
         ];
     }
 
@@ -558,36 +611,390 @@ Analyze the provided text carefully and generate the review using this exact lay
         <?php
     }
 
+    /**
+     * Shared JS logic used by both admin page and frontend shortcode.
+     */
+    private static function get_chat_js($rest_url, $nonce) {
+        $max_client = (int) self::MAX_CLIENT_MESSAGES;
+        // Build JS carefully without nested heredoc issues
+        $js = <<<'JSBASE'
+(function() {
+    const inputEl        = document.getElementById('agent-input');
+    const evalEl         = document.getElementById('evaluation');
+    const scenarioBoxEl  = document.getElementById('scenario-box');
+    const messagesEl     = document.getElementById('messages');
+    const agentNameInput = document.getElementById('agent-name-input');
+    const agentNameHint  = document.getElementById('agent-name-hint');
+    const sendBtn        = document.getElementById('send-btn');
+    const evaluateBtn    = document.getElementById('evaluate-btn');
+    const retryBtn       = document.getElementById('retry-client-btn');
+    const modalOverlay   = document.getElementById('pt-results-modal');
+    const modalBody      = document.getElementById('pt-modal-body');
+    const modalClose     = document.getElementById('pt-modal-close');
+
+    const savedName = localStorage.getItem('presale_agent_name') || '';
+    if (savedName && agentNameInput) agentNameInput.value = savedName;
+
+    if (agentNameInput) {
+        agentNameInput.addEventListener('input', function() {
+            localStorage.setItem('presale_agent_name', this.value.trim());
+            if (agentNameHint) agentNameHint.style.display = 'none';
+        });
+    }
+
+    const state = {
+        messages: [],
+        scenario: null,
+        isLoading: false,
+        followupMode: false,
+        chatEnded: false,
+        evaluated: false
+    };
+
+    const MAX_CLIENT = __MAX_CLIENT__;
+    const REST_URL = '__REST_URL__';
+    const NONCE = '__NONCE__';
+
+    function escapeHtml(str) {
+        return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
+    }
+
+    function countClientMessages() {
+        return state.messages.filter(m => m.role === 'assistant').length;
+    }
+
+    function lastIsError() {
+        if (!state.messages.length) return false;
+        const last = state.messages[state.messages.length - 1];
+        return last.role === 'assistant' && String(last.content || '').indexOf('[Error]') === 0;
+    }
+
+    function updateUI() {
+        if (retryBtn) {
+            retryBtn.style.display = lastIsError() && !state.chatEnded ? 'inline-block' : 'none';
+        }
+        if (sendBtn) {
+            sendBtn.disabled = state.isLoading || state.chatEnded;
+            if (state.followupMode && !state.chatEnded) {
+                sendBtn.textContent = 'Відправити фолоуап';
+            } else {
+                sendBtn.textContent = 'Відправити';
+            }
+        }
+        if (evaluateBtn) {
+            evaluateBtn.disabled = state.isLoading;
+        }
+        if (inputEl) {
+            inputEl.disabled = state.isLoading || state.chatEnded;
+            if (state.followupMode && !state.chatEnded) {
+                inputEl.placeholder = 'Напишіть фолоуап (підсумок + наступний крок)...';
+            } else if (state.chatEnded) {
+                inputEl.placeholder = 'Чат завершено. Можна оцінити ще раз або почати новий сценарій.';
+            } else {
+                inputEl.placeholder = 'Введіть відповідь як presale-агент...';
+            }
+        }
+    }
+
+    function renderMessages() {
+        messagesEl.innerHTML = state.messages.map(m => {
+            if (m.role === 'system') {
+                return '<div class="pt-msg pt-msg-system"><div class="pt-msg-bubble"><strong>⚡ Система:</strong> ' + escapeHtml(m.content) + '</div></div>';
+            }
+            const isCustomer = m.role === 'assistant';
+            const isError = isCustomer && String(m.content || '').indexOf('[Error]') === 0;
+            const style = isError ? 'border:1px solid #d63638;background:#fcf0f1;' : '';
+            return '<div class="pt-msg ' + (isCustomer ? 'pt-msg-customer' : 'pt-msg-agent') + '">' +
+                '<div class="pt-label">' + (isCustomer ? 'Клієнт' : 'Ви') + '</div>' +
+                '<div class="pt-msg-bubble" style="' + style + '">' + escapeHtml(m.content) + '</div></div>';
+        }).join('');
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        updateUI();
+    }
+
+    function setLoading(isLoading) {
+        state.isLoading = isLoading;
+        ['send-btn', 'new-scenario-btn', 'evaluate-btn', 'retry-client-btn'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = isLoading;
+        });
+        if (inputEl) inputEl.disabled = isLoading || state.chatEnded;
+        updateUI();
+    }
+
+    function buildScoresHtml(scores, feedback) {
+        if (!scores) {
+            return '<pre style="white-space:pre-wrap;margin:0;font-size:13px;">' + escapeHtml(feedback) + '</pre>';
+        }
+        const overall = scores.overall;
+        let color = '#666';
+        if (overall !== null && overall !== undefined) {
+            if (overall >= 80) color = '#00a32a';
+            else if (overall >= 60) color = '#dba617';
+            else color = '#d63638';
+        }
+        const row = (label, val) =>
+            '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #e5e5e5;">' +
+            '<span>' + label + '</span><strong>' + (val !== null && val !== undefined ? val + '%' : '—') + '</strong></div>';
+        return '<div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:12px;">' +
+            '<div style="text-align:center;margin-bottom:10px;">' +
+            '<div style="font-size:12px;color:#666;">Загальний бал</div>' +
+            '<div style="font-size:28px;font-weight:700;color:' + color + ';">' +
+            (overall !== null && overall !== undefined ? overall + '%' : '—') + '</div></div>' +
+            row('Discovery', scores.discovery) +
+            row('Architecture', scores.architecture) +
+            row('Commercial', scores.commercial) +
+            row('Tone', scores.tone) +
+            '</div><details open><summary style="cursor:pointer;font-weight:600;margin-bottom:6px;">Повний фідбек</summary>' +
+            '<pre style="white-space:pre-wrap;margin:0;font-size:12.5px;line-height:1.45;">' + escapeHtml(feedback) + '</pre></details>';
+    }
+
+    function renderScores(scores, feedback) {
+        const html = buildScoresHtml(scores, feedback);
+        if (evalEl) evalEl.innerHTML = html;
+        if (modalBody && modalOverlay) {
+            modalBody.innerHTML = html;
+            modalOverlay.style.display = 'flex';
+        }
+        state.evaluated = true;
+    }
+
+    function closeModal() {
+        if (modalOverlay) modalOverlay.style.display = 'none';
+    }
+
+    if (modalClose) modalClose.addEventListener('click', closeModal);
+    if (modalOverlay) {
+        modalOverlay.addEventListener('click', function(e) {
+            if (e.target === modalOverlay) closeModal();
+        });
+    }
+
+    async function api(path, payload) {
+        payload = payload || {};
+        try {
+            const res = await fetch(REST_URL + path, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-WP-Nonce': NONCE
+                },
+                body: JSON.stringify(payload)
+            });
+            return await res.json();
+        } catch (err) {
+            return { error: err.message || 'Помилка з’єднання' };
+        }
+    }
+
+    async function loadScenario() {
+        setLoading(true);
+        state.messages = [];
+        state.followupMode = false;
+        state.chatEnded = false;
+        state.evaluated = false;
+        if (evalEl) evalEl.innerHTML = '';
+        closeModal();
+        scenarioBoxEl.innerHTML = '<em>Генеруємо новий сценарій...</em>';
+        const data = await api('start');
+        if (data.error) {
+            scenarioBoxEl.innerHTML = '<span style="color:#b32d2e;">Помилка: ' + escapeHtml(data.error) + '</span>';
+            setLoading(false);
+            return;
+        }
+        if (data.scenario) {
+            state.scenario = data.scenario;
+            const concerns = Array.isArray(data.scenario.concerns)
+                ? data.scenario.concerns.join(', ')
+                : (data.scenario.concerns || '—');
+            scenarioBoxEl.innerHTML =
+                '<strong>Тип клієнта:</strong> ' + escapeHtml(data.scenario.customer_type) + '<br>' +
+                '<strong>Настрій:</strong> ' + escapeHtml(data.scenario.mood) + '<br>' +
+                '<strong>Кейс:</strong> ' + escapeHtml(data.scenario.use_case) + '<br>' +
+                '<strong>Побоювання:</strong> ' + escapeHtml(concerns);
+            state.messages = [{
+                role: 'assistant',
+                content: data.scenario.first_message || 'Hi! Can you help me choose the right Crocoblock setup?'
+            }];
+            renderMessages();
+        }
+        setLoading(false);
+    }
+
+    async function runEvaluate(showModal) {
+        if (showModal === undefined) showModal = true;
+        const agentName = agentNameInput ? agentNameInput.value.trim() : '';
+        if (!agentName) {
+            if (agentNameHint) agentNameHint.style.display = 'inline';
+            if (agentNameInput) agentNameInput.focus();
+            return false;
+        }
+        if (state.messages.length < 3) {
+            if (evalEl) evalEl.innerHTML = '<span style="color:#b32d2e;">Діалог закороткий для оцінювання.</span>';
+            return false;
+        }
+        setLoading(true);
+        if (evalEl) evalEl.innerHTML = '<em>Аналізуємо розмову...</em>';
+        const data = await api('evaluate', {
+            messages: state.messages,
+            scenario: state.scenario,
+            agent_name: agentName
+        });
+        if (data.message) {
+            if (showModal) {
+                renderScores(data.scores || null, data.message);
+            } else {
+                if (evalEl) evalEl.innerHTML = buildScoresHtml(data.scores || null, data.message);
+                state.evaluated = true;
+            }
+            setLoading(false);
+            return true;
+        } else {
+            if (evalEl) evalEl.innerHTML = '<span style="color:#b32d2e;">Помилка аналізу: ' + escapeHtml(data.error || 'Unknown error') + '. Спробуйте кнопку «Оцінити розмову» ще раз.</span>';
+            setLoading(false);
+            return false;
+        }
+    }
+
+    async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text || state.isLoading || state.chatEnded) return;
+
+        state.messages.push({ role: 'user', content: text });
+        inputEl.value = '';
+        renderMessages();
+        setLoading(true);
+
+        // Follow-up was just sent → end chat & auto-evaluate
+        if (state.followupMode) {
+            state.chatEnded = true;
+            state.followupMode = false;
+            renderMessages();
+            setLoading(false);
+            await runEvaluate(true);
+            return;
+        }
+
+        const data = await api('chat', { messages: state.messages, scenario: state.scenario });
+
+        if (data.force_followup && data.system_notice) {
+            state.messages.push({ role: 'system', content: data.system_notice });
+            state.followupMode = true;
+        } else if (data.message) {
+            state.messages.push({ role: 'assistant', content: data.message });
+            if (countClientMessages() >= MAX_CLIENT) {
+                state.messages.push({
+                    role: 'system',
+                    content: 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок.'
+                });
+                state.followupMode = true;
+            }
+        } else {
+            state.messages.push({
+                role: 'assistant',
+                content: '[Error] ' + (data.error || 'Unknown error')
+            });
+        }
+        renderMessages();
+        setLoading(false);
+    }
+
+    async function retryClientReply() {
+        if (!lastIsError() || state.isLoading || state.chatEnded) return;
+        state.messages.pop();
+        renderMessages();
+        setLoading(true);
+        const data = await api('chat', { messages: state.messages, scenario: state.scenario });
+        if (data.force_followup && data.system_notice) {
+            state.messages.push({ role: 'system', content: data.system_notice });
+            state.followupMode = true;
+        } else if (data.message) {
+            state.messages.push({ role: 'assistant', content: data.message });
+        } else {
+            state.messages.push({
+                role: 'assistant',
+                content: '[Error] ' + (data.error || 'Unknown error')
+            });
+        }
+        renderMessages();
+        setLoading(false);
+    }
+
+    if (sendBtn) sendBtn.addEventListener('click', sendMessage);
+    if (inputEl) {
+        inputEl.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    }
+    if (retryBtn) retryBtn.addEventListener('click', retryClientReply);
+
+    if (evaluateBtn) {
+        evaluateBtn.addEventListener('click', async () => {
+            await runEvaluate(true);
+        });
+    }
+
+    const resetBtn = document.getElementById('reset-btn');
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            state.messages = [];
+            state.followupMode = false;
+            state.chatEnded = false;
+            state.evaluated = false;
+            if (evalEl) evalEl.innerHTML = '';
+            closeModal();
+            renderMessages();
+        });
+    }
+
+    const newScenarioBtn = document.getElementById('new-scenario-btn');
+    if (newScenarioBtn) {
+        newScenarioBtn.addEventListener('click', () => {
+            loadScenario();
+        });
+    }
+
+    loadScenario();
+})();
+JSBASE;
+        $js = str_replace('__MAX_CLIENT__', (string) $max_client, $js);
+        $js = str_replace('__REST_URL__', $rest_url, $js);
+        $js = str_replace('__NONCE__', $nonce, $js);
+        return $js;
+    }
+
     public static function render_chat_page() {
+        $rest_url = esc_url_raw(rest_url('training/v1/'));
+        $nonce    = wp_create_nonce('wp_rest');
         ?>
         <div class="wrap" style="height: calc(100vh - 70px);">
             <h1>Presale Training — Чат</h1>
 
-            <!-- Поле з ніком агента -->
-            <div style="margin-bottom: 16px; display:flex; align-items:center; gap:12px;">
+            <div style="margin-bottom: 16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
                 <label for="agent-name-input" style="font-weight:600; white-space:nowrap;">Ваш нік / Ім’я:</label>
                 <input type="text" id="agent-name-input" class="regular-text" placeholder="Наприклад: Olena / Alex / Support_Nick" style="max-width:280px;" />
                 <span id="agent-name-hint" style="color:#b32d2e; font-size:13px; display:none;">← обов’язково вкажіть нік перед оцінкою</span>
             </div>
 
             <div id="presale-training-app" style="display:flex; gap:16px; height: calc(100vh - 210px); min-height:600px;">
-                <!-- Ліва колонка -->
                 <div style="flex: 0 0 36%; background:#fff; border:1px solid #c3c4c7; border-radius:8px; padding:16px; display:flex; flex-direction:column;">
                     <button class="button" id="new-scenario-btn" style="margin-bottom:12px;">Новий випадковий сценарій</button>
                     <h3 style="margin:0 0 8px 0;">Сценарій</h3>
                     <div id="scenario-box" style="flex:1; overflow:auto; background:#f6f7f7; border:1px solid #dcdcde; border-radius:6px; padding:12px; line-height:1.5;"></div>
-                    
                     <h3 style="margin:12px 0 8px 0;">Оцінювання</h3>
                     <div id="evaluation" style="max-height:38%; overflow:auto; background:#f0f0f1; border:1px solid #dcdcde; border-radius:6px; padding:12px; font-size:13.5px;"></div>
                 </div>
 
-                <!-- Права колонка — чат -->
                 <div style="flex:1; background:#fff; border:1px solid #c3c4c7; border-radius:8px; display:flex; flex-direction:column; min-width:0;">
                     <div id="messages" style="flex:1; overflow:auto; padding:20px; background:#f9f9f9; border-bottom:1px solid #c3c4c7; display:flex; flex-direction:column; gap:16px;"></div>
                     <div style="padding:16px;">
                         <textarea id="agent-input" style="width:100%; min-height:110px; resize:vertical; padding:12px; font-size:15px;" placeholder="Введіть відповідь як presale-агент..."></textarea>
-                        <div style="margin-top: 12px; display: flex; gap: 10px;">
+                        <div style="margin-top: 12px; display: flex; gap: 10px; flex-wrap:wrap;">
                             <button class="button button-primary" id="send-btn">Відправити</button>
+                            <button class="button" id="retry-client-btn" style="display:none; border-color:#d63638; color:#d63638;">↻ Повторити відповідь клієнта</button>
                             <button class="button" id="evaluate-btn">Оцінити розмову</button>
                             <button class="button" id="reset-btn">Скинути чат</button>
                         </div>
@@ -596,247 +1003,35 @@ Analyze the provided text carefully and generate the review using this exact lay
             </div>
         </div>
 
-        <script>
-        (function() {
-            const inputEl        = document.getElementById('agent-input');
-            const evalEl         = document.getElementById('evaluation');
-            const scenarioBoxEl  = document.getElementById('scenario-box');
-            const messagesEl     = document.getElementById('messages');
-            const agentNameInput = document.getElementById('agent-name-input');
-            const agentNameHint  = document.getElementById('agent-name-hint');
-
-            // Відновлюємо нік з localStorage
-            const savedName = localStorage.getItem('presale_agent_name') || '';
-            if (savedName) {
-                agentNameInput.value = savedName;
-            }
-
-            agentNameInput.addEventListener('input', function() {
-                localStorage.setItem('presale_agent_name', this.value.trim());
-                agentNameHint.style.display = 'none';
-            });
-
-            const state = { messages: [], scenario: null, isLoading: false };
-
-            function renderMessages() {
-    messagesEl.innerHTML = state.messages.map(m => {
-        if (m.role === 'system') {
-            return `
-                <div style="max-width: 92%; align-self: center; text-align: center;">
-                    <div style="background: #fff3cd; color: #856404; border: 1px solid #ffeeba; padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height: 1.45;">
-                        <strong>⚡ Система:</strong> ${escapeHtml(m.content)}
-                    </div>
-                </div>`;
-        }
-
-        const isCustomer = m.role === 'assistant';
-        return `
-            <div style="max-width: 86%; align-self: ${isCustomer ? 'flex-start' : 'flex-end'};">
-                <div style="font-size: 13px; color: #666; margin-bottom: 4px;">${isCustomer ? 'Клієнт' : 'Ви'}</div>
-                <div style="background: ${isCustomer ? '#ffffff' : '#2271b1'}; color: ${isCustomer ? '#000' : '#fff'}; padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45;">
-                    ${escapeHtml(m.content)}
+        <div id="pt-results-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:100000; align-items:center; justify-content:center; padding:20px;">
+            <div style="background:#fff; border-radius:12px; max-width:640px; width:100%; max-height:85vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,0.2);">
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid #e0e0e0;">
+                    <strong style="font-size:16px;">Результати оцінювання</strong>
+                    <button type="button" id="pt-modal-close" class="button">Закрити</button>
                 </div>
-            </div>`;
-    }).join('');
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-}
+                <div id="pt-modal-body" style="padding:20px;"></div>
+            </div>
+        </div>
 
-            function escapeHtml(str) {
-                return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
-            }
+        <style>
+        .pt-msg { max-width: 86%; }
+        .pt-msg-customer { align-self: flex-start; }
+        .pt-msg-agent { align-self: flex-end; }
+        .pt-msg-system { align-self: center; max-width: 92%; }
+        .pt-msg-bubble { padding: 14px 18px; border-radius: 12px; font-size: 15px; line-height: 1.45; }
+        .pt-msg-customer .pt-msg-bubble { background: #fff; border: 1px solid #e2e2e2; color: #000; }
+        .pt-msg-agent .pt-msg-bubble { background: #2271b1; color: #fff; }
+        .pt-msg-system .pt-msg-bubble { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center; }
+        .pt-label { font-size: 13px; color: #666; margin-bottom: 4px; }
+        </style>
 
-            function setLoading(isLoading) {
-                state.isLoading = isLoading;
-                document.getElementById('send-btn').disabled = isLoading;
-                document.getElementById('new-scenario-btn').disabled = isLoading;
-                document.getElementById('evaluate-btn').disabled = isLoading;
-                inputEl.disabled = isLoading;
-            }
-
-            function renderScores(scores, feedback) {
-                if (!scores) {
-                    evalEl.innerHTML = `<pre style="white-space:pre-wrap; margin:0;">${escapeHtml(feedback)}</pre>`;
-                    return;
-                }
-
-                const overall = scores.overall;
-                let overallColor = '#666';
-                if (overall !== null) {
-                    if (overall >= 80) overallColor = '#00a32a';
-                    else if (overall >= 60) overallColor = '#dba617';
-                    else overallColor = '#d63638';
-                }
-
-                const scoreRow = (label, value) => {
-                    const val = value !== null && value !== undefined ? value + '%' : '—';
-                    return `<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #e0e0e0;">
-                        <span>${label}</span>
-                        <strong>${val}</strong>
-                    </div>`;
-                };
-
-                evalEl.innerHTML = `
-                    <div style="background:#fff; border:1px solid #c3c4c7; border-radius:8px; padding:14px; margin-bottom:12px;">
-                        <div style="text-align:center; margin-bottom:12px;">
-                            <div style="font-size:13px; color:#666; margin-bottom:4px;">Загальний бал</div>
-                            <div style="font-size:32px; font-weight:700; color:${overallColor};">
-                                ${overall !== null ? overall + '%' : '—'}
-                            </div>
-                        </div>
-                        ${scoreRow('Discovery', scores.discovery)}
-                        ${scoreRow('Architecture', scores.architecture)}
-                        ${scoreRow('Commercial', scores.commercial)}
-                        ${scoreRow('Tone', scores.tone)}
-                    </div>
-                    <details open>
-                        <summary style="cursor:pointer; font-weight:600; margin-bottom:8px;">Повний фідбек</summary>
-                        <pre style="white-space:pre-wrap; margin:0; font-size:13px; line-height:1.45;">${escapeHtml(feedback)}</pre>
-                    </details>
-                `;
-            }
-
-            async function api(path, payload = {}) {
-                try {
-                    const res = await fetch('<?php echo esc_url_raw(rest_url('training/v1/')); ?>' + path, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-WP-Nonce': '<?php echo esc_js(wp_create_nonce('wp_rest')); ?>'
-                        },
-                        body: JSON.stringify(payload)
-                    });
-                    return await res.json();
-                } catch (err) {
-                    return { error: err.message || 'Помилка з’єднання із сервером' };
-                }
-            }
-
-            async function loadScenario() {
-                setLoading(true);
-                scenarioBoxEl.innerHTML = '<em>Генеруємо новий сценарій...</em>';
-                evalEl.innerHTML = '';
-
-                const data = await api('start');
-
-                if (data.error) {
-                    scenarioBoxEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error)}</span>`;
-                    setLoading(false);
-                    return;
-                }
-
-                if (data.scenario) {
-                    state.scenario = data.scenario;
-                    scenarioBoxEl.innerHTML = `
-                        <strong>Тип клієнта:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
-                        <strong>Настрій:</strong> ${escapeHtml(data.scenario.mood)}<br>
-                        <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
-                        <strong>Ключові побоювання:</strong> ${escapeHtml(data.scenario.concerns)}
-                    `;
-
-                    state.messages = [{
-                        role: 'assistant',
-                        content: data.scenario.first_message || 'Hi! Can you help me choose the right Crocoblock setup?'
-                    }];
-                    renderMessages();
-                }
-
-                setLoading(false);
-            }
-
-            async function sendMessage() {
-    const text = inputEl.value.trim();
-    if (!text || state.isLoading) return;
-
-    state.messages.push({ role: 'user', content: text });
-    inputEl.value = '';
-    renderMessages();
-    setLoading(true);
-
-    const data = await api('chat', { messages: state.messages, scenario: state.scenario });
-
-    if (data.force_followup && data.system_notice) {
-        // Спеціальне повідомлення від системи
-        state.messages.push({
-            role: 'system',
-            content: data.system_notice
-        });
-    } else if (data.message) {
-        state.messages.push({ role: 'assistant', content: data.message });
-    } else {
-        state.messages.push({
-            role: 'assistant',
-            content: `[Error] ${data.error || 'Unknown error'}`
-        });
-    }
-
-    renderMessages();
-    setLoading(false);
-}
-
-            document.getElementById('send-btn').addEventListener('click', sendMessage);
-            inputEl.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
-                }
-            });
-
-            document.getElementById('evaluate-btn').addEventListener('click', async () => {
-                const agentName = agentNameInput.value.trim();
-                if (!agentName) {
-                    agentNameHint.style.display = 'inline';
-                    agentNameInput.focus();
-                    return;
-                }
-
-                if (state.messages.length < 3) {
-                    evalEl.innerHTML = '<span style="color:#b32d2e;">Діалог закороткий для оцінювання.</span>';
-                    return;
-                }
-
-                setLoading(true);
-                evalEl.innerHTML = '<em>Аналізуємо розмову...</em>';
-
-                const data = await api('evaluate', {
-                    messages: state.messages,
-                    scenario: state.scenario,
-                    agent_name: agentName
-                });
-
-                if (data.message) {
-                    renderScores(data.scores || null, data.message);
-                } else {
-                    evalEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error || 'Unknown error')}</span>`;
-                }
-
-                setLoading(false);
-            });
-
-            document.getElementById('reset-btn').addEventListener('click', () => {
-                state.messages = [];
-                evalEl.innerHTML = '';
-                renderMessages();
-            });
-
-            document.getElementById('new-scenario-btn').addEventListener('click', () => {
-                state.messages = [];
-                evalEl.innerHTML = '';
-                renderMessages();
-                loadScenario();
-            });
-
-            loadScenario();
-        })();
+        <script>
+        <?php echo self::get_chat_js($rest_url, $nonce); ?>
         </script>
         <?php
     }
 
-        /* ============================================================
-     * FRONTEND (шорткод + стилі)
-     * ============================================================ */
-
     public static function enqueue_frontend_assets() {
-        // Підключаємо стилі завжди (шорткод може бути на будь-якій сторінці)
         wp_register_style('presale-training-front', false);
         wp_enqueue_style('presale-training-front');
         wp_add_inline_style('presale-training-front', self::get_frontend_css());
@@ -870,6 +1065,7 @@ Analyze the provided text carefully and generate the review using this exact lay
         .pt-btn-primary { background: #2271b1; color: #fff; border-color: #2271b1; }
         .pt-btn-primary:hover { background: #135e96; }
         .pt-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+        .pt-btn-retry { border-color: #d63638; color: #d63638; }
 
         .pt-msg { max-width: 85%; }
         .pt-msg-customer { align-self: flex-start; }
@@ -886,6 +1082,11 @@ Analyze the provided text carefully and generate the review using this exact lay
 
         .pt-sidebar h3 { margin: 0 0 8px; font-size: 15px; }
         .pt-new-scenario { margin-bottom: 14px; width: 100%; }
+
+        #pt-results-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 99999; align-items: center; justify-content: center; padding: 20px; }
+        #pt-results-modal .pt-modal-inner { background: #fff; border-radius: 12px; max-width: 640px; width: 100%; max-height: 85vh; overflow: auto; box-shadow: 0 12px 40px rgba(0,0,0,0.2); }
+        #pt-results-modal .pt-modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #e0e0e0; }
+        #pt-results-modal .pt-modal-body { padding: 20px; }
 
         @media (max-width: 860px) {
             .pt-layout { flex-direction: column; }
@@ -952,7 +1153,6 @@ Analyze the provided text carefully and generate the review using this exact lay
             </div>
 
             <div class="pt-layout">
-                <!-- Sidebar -->
                 <div class="pt-sidebar">
                     <button class="pt-btn pt-new-scenario" id="new-scenario-btn">Новий випадковий сценарій</button>
                     <h3>Сценарій</h3>
@@ -961,13 +1161,13 @@ Analyze the provided text carefully and generate the review using this exact lay
                     <div id="evaluation" class="pt-eval-box"></div>
                 </div>
 
-                <!-- Chat -->
                 <div class="pt-chat">
                     <div id="messages" class="pt-messages"></div>
                     <div class="pt-input-area">
                         <textarea id="agent-input" placeholder="Введіть відповідь як presale-агент..."></textarea>
                         <div class="pt-buttons">
                             <button class="pt-btn pt-btn-primary" id="send-btn">Відправити</button>
+                            <button class="pt-btn pt-btn-retry" id="retry-client-btn" style="display:none;">↻ Повторити відповідь клієнта</button>
                             <button class="pt-btn" id="evaluate-btn">Оцінити розмову</button>
                             <button class="pt-btn" id="reset-btn">Скинути чат</button>
                         </div>
@@ -976,201 +1176,18 @@ Analyze the provided text carefully and generate the review using this exact lay
             </div>
         </div>
 
+        <div id="pt-results-modal">
+            <div class="pt-modal-inner">
+                <div class="pt-modal-header">
+                    <strong>Результати оцінювання</strong>
+                    <button type="button" class="pt-btn" id="pt-modal-close">Закрити</button>
+                </div>
+                <div class="pt-modal-body" id="pt-modal-body"></div>
+            </div>
+        </div>
+
         <script>
-        (function() {
-            const inputEl        = document.getElementById('agent-input');
-            const evalEl         = document.getElementById('evaluation');
-            const scenarioBoxEl  = document.getElementById('scenario-box');
-            const messagesEl     = document.getElementById('messages');
-            const agentNameInput = document.getElementById('agent-name-input');
-            const agentNameHint  = document.getElementById('agent-name-hint');
-
-            const savedName = localStorage.getItem('presale_agent_name') || '';
-            if (savedName) agentNameInput.value = savedName;
-
-            agentNameInput.addEventListener('input', function() {
-                localStorage.setItem('presale_agent_name', this.value.trim());
-                agentNameHint.style.display = 'none';
-            });
-
-            const state = { messages: [], scenario: null, isLoading: false };
-
-            function escapeHtml(str) {
-                return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
-            }
-
-            function renderMessages() {
-                messagesEl.innerHTML = state.messages.map(m => {
-                    if (m.role === 'system') {
-                        return `<div class="pt-msg pt-msg-system"><div class="pt-msg-bubble"><strong>⚡ Система:</strong> ${escapeHtml(m.content)}</div></div>`;
-                    }
-                    const isCustomer = m.role === 'assistant';
-                    return `
-                        <div class="pt-msg ${isCustomer ? 'pt-msg-customer' : 'pt-msg-agent'}">
-                            <div class="pt-label">${isCustomer ? 'Клієнт' : 'Ви'}</div>
-                            <div class="pt-msg-bubble">${escapeHtml(m.content)}</div>
-                        </div>`;
-                }).join('');
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
-
-            function setLoading(isLoading) {
-                state.isLoading = isLoading;
-                ['send-btn', 'new-scenario-btn', 'evaluate-btn'].forEach(id => {
-                    const el = document.getElementById(id);
-                    if (el) el.disabled = isLoading;
-                });
-                inputEl.disabled = isLoading;
-            }
-
-            function renderScores(scores, feedback) {
-                if (!scores) {
-                    evalEl.innerHTML = `<pre style="white-space:pre-wrap;margin:0;font-size:13px;">${escapeHtml(feedback)}</pre>`;
-                    return;
-                }
-                const overall = scores.overall;
-                let color = '#666';
-                if (overall !== null) {
-                    if (overall >= 80) color = '#00a32a';
-                    else if (overall >= 60) color = '#dba617';
-                    else color = '#d63638';
-                }
-                const row = (label, val) => `
-                    <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #e5e5e5;">
-                        <span>${label}</span><strong>${val !== null && val !== undefined ? val + '%' : '—'}</strong>
-                    </div>`;
-                evalEl.innerHTML = `
-                    <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px;margin-bottom:12px;">
-                        <div style="text-align:center;margin-bottom:10px;">
-                            <div style="font-size:12px;color:#666;">Загальний бал</div>
-                            <div style="font-size:28px;font-weight:700;color:${color};">${overall !== null ? overall + '%' : '—'}</div>
-                        </div>
-                        ${row('Discovery', scores.discovery)}
-                        ${row('Architecture', scores.architecture)}
-                        ${row('Commercial', scores.commercial)}
-                        ${row('Tone', scores.tone)}
-                    </div>
-                    <details open>
-                        <summary style="cursor:pointer;font-weight:600;margin-bottom:6px;">Повний фідбек</summary>
-                        <pre style="white-space:pre-wrap;margin:0;font-size:12.5px;line-height:1.45;">${escapeHtml(feedback)}</pre>
-                    </details>`;
-            }
-
-            async function api(path, payload = {}) {
-                try {
-                    const res = await fetch('<?php echo $rest_url; ?>' + path, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-WP-Nonce': '<?php echo esc_js($nonce); ?>'
-                        },
-                        body: JSON.stringify(payload)
-                    });
-                    return await res.json();
-                } catch (err) {
-                    return { error: err.message || 'Помилка з’єднання' };
-                }
-            }
-
-            async function loadScenario() {
-                setLoading(true);
-                scenarioBoxEl.innerHTML = '<em>Генеруємо новий сценарій...</em>';
-                evalEl.innerHTML = '';
-                const data = await api('start');
-                if (data.error) {
-                    scenarioBoxEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error)}</span>`;
-                    setLoading(false);
-                    return;
-                }
-                if (data.scenario) {
-                    state.scenario = data.scenario;
-                    const concerns = Array.isArray(data.scenario.concerns)
-                        ? data.scenario.concerns.join(', ')
-                        : (data.scenario.concerns || '—');
-                    scenarioBoxEl.innerHTML = `
-                        <strong>Тип клієнта:</strong> ${escapeHtml(data.scenario.customer_type)}<br>
-                        <strong>Настрій:</strong> ${escapeHtml(data.scenario.mood)}<br>
-                        <strong>Кейс:</strong> ${escapeHtml(data.scenario.use_case)}<br>
-                        <strong>Побоювання:</strong> ${escapeHtml(concerns)}`;
-                    state.messages = [{
-                        role: 'assistant',
-                        content: data.scenario.first_message || 'Hi! Can you help me choose the right Crocoblock setup?'
-                    }];
-                    renderMessages();
-                }
-                setLoading(false);
-            }
-
-            async function sendMessage() {
-                const text = inputEl.value.trim();
-                if (!text || state.isLoading) return;
-                state.messages.push({ role: 'user', content: text });
-                inputEl.value = '';
-                renderMessages();
-                setLoading(true);
-
-                const data = await api('chat', { messages: state.messages, scenario: state.scenario });
-
-                if (data.force_followup && data.system_notice) {
-                    state.messages.push({ role: 'system', content: data.system_notice });
-                } else if (data.message) {
-                    state.messages.push({ role: 'assistant', content: data.message });
-                } else {
-                    state.messages.push({ role: 'assistant', content: `[Error] ${data.error || 'Unknown error'}` });
-                }
-                renderMessages();
-                setLoading(false);
-            }
-
-            document.getElementById('send-btn').addEventListener('click', sendMessage);
-            inputEl.addEventListener('keydown', e => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
-                }
-            });
-
-            document.getElementById('evaluate-btn').addEventListener('click', async () => {
-                const agentName = agentNameInput.value.trim();
-                if (!agentName) {
-                    agentNameHint.style.display = 'inline';
-                    agentNameInput.focus();
-                    return;
-                }
-                if (state.messages.length < 3) {
-                    evalEl.innerHTML = '<span style="color:#b32d2e;">Діалог закороткий для оцінювання.</span>';
-                    return;
-                }
-                setLoading(true);
-                evalEl.innerHTML = '<em>Аналізуємо розмову...</em>';
-                const data = await api('evaluate', {
-                    messages: state.messages,
-                    scenario: state.scenario,
-                    agent_name: agentName
-                });
-                if (data.message) {
-                    renderScores(data.scores || null, data.message);
-                } else {
-                    evalEl.innerHTML = `<span style="color:#b32d2e;">Помилка: ${escapeHtml(data.error || 'Unknown error')}</span>`;
-                }
-                setLoading(false);
-            });
-
-            document.getElementById('reset-btn').addEventListener('click', () => {
-                state.messages = [];
-                evalEl.innerHTML = '';
-                renderMessages();
-            });
-
-            document.getElementById('new-scenario-btn').addEventListener('click', () => {
-                state.messages = [];
-                evalEl.innerHTML = '';
-                renderMessages();
-                loadScenario();
-            });
-
-            loadScenario();
-        })();
+        <?php echo self::get_chat_js($rest_url, $nonce); ?>
         </script>
         <?php
     }
