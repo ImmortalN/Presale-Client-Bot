@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.3
+ * Version: 0.4.4
  * Author: Team
  */
 
@@ -222,13 +222,18 @@ class Presale_Training_MVP {
             : (string) $scenario;
 
         $system_prompt = "You are a REAL potential customer considering Crocoblock products (JetEngine, JetFormBuilder, JetBooking, JetSmartFilters, All-Inclusive subscription, etc.).\n\n"
-            . "CRITICAL ROLE RULES (never break them):\n"
+            . "OUTPUT RULE (most important):\n"
+            . "- Reply with ONLY the customer's chat message. Nothing else.\n"
+            . "- Do NOT write analysis, planning, reasoning, meta-commentary, or instructions to yourself.\n"
+            . "- Do NOT start with phrases like \"We need to\", \"As the customer\", \"The user said\", \"Now I should\", \"Let's\", \"I will reply\".\n"
+            . "- First character of your output must be the start of the customer's message.\n\n"
+            . "CRITICAL ROLE RULES:\n"
             . "- You are ONLY the customer. NEVER reply as a support agent, Crocoblock employee, or salesperson.\n"
             . "- NEVER offer solutions, recommend plugins, give pricing advice, or sound helpful like support.\n"
             . "- NEVER start sentences with \"I can help\", \"Let me recommend\", \"Based on your needs\" — that is agent language.\n"
             . "- Speak as a real person who is buying / evaluating, not as an AI.\n\n"
             . "HOW TO REPLY (priority order):\n"
-            . "1. If the agent asked you clarifying questions about your project — ANSWER them first (briefly, 1–2 facts). Do not ignore discovery questions.\n"
+            . "1. If the agent asked clarifying questions about your project — ANSWER them first (briefly, 1–2 facts). Do not ignore discovery questions.\n"
             . "2. Then you may ask ONE short follow-up of your own (price, plan, guarantee, licensing, competitor, timeline).\n"
             . "3. Stay consistent with the scenario. Invent plausible details if needed (e.g. appointments for hairdressers, online payments yes/no).\n\n"
             . "Reply style:\n"
@@ -251,10 +256,13 @@ class Presale_Training_MVP {
             'max_tokens'  => 280,
         ], true);
 
-        // Light post-filter: if model slipped into agent role, reject and force retry-friendly error
+        // Post-filter: reject role slips and chain-of-thought leakage
         if (isset($response['message'])) {
-            $msg_lower = strtolower($response['message']);
-            $agent_phrases = [
+            $msg = trim($response['message']);
+            $msg_lower = strtolower($msg);
+
+            $bad_phrases = [
+                // agent role
                 'i can help you',
                 'let me recommend',
                 'based on your needs',
@@ -264,14 +272,42 @@ class Presale_Training_MVP {
                 'here is the link',
                 'as a support',
                 'from crocoblock',
+                // chain-of-thought / meta
+                'we need to respond',
+                'we need to reply',
+                'as the customer',
+                'as a customer',
+                'continuing the conversation',
+                'the user (agent)',
+                'the agent said',
+                'the agent ended',
+                'now as the customer',
+                'now we need',
+                'now i should',
+                'let\'s read',
+                'let us read',
+                'i will reply',
+                'my reply should',
+                'scenario:',
+                'we must follow',
+                'role rules',
             ];
-            foreach ($agent_phrases as $phrase) {
+            foreach ($bad_phrases as $phrase) {
                 if (strpos($msg_lower, $phrase) !== false) {
                     return rest_ensure_response([
-                        'error' => 'Role slip detected — please retry client reply.',
+                        'error' => 'Invalid client reply (role/meta leak) — please retry.',
                     ]);
                 }
             }
+
+            // Too long = almost always leaked reasoning
+            if (str_word_count($msg) > 80) {
+                return rest_ensure_response([
+                    'error' => 'Client reply too long / looks like reasoning — please retry.',
+                ]);
+            }
+
+            $response['message'] = $msg;
         }
 
         return rest_ensure_response($response);
@@ -293,28 +329,36 @@ class Presale_Training_MVP {
         $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology.
 
 ### CORE PRESALE PHILOSOPHY
-The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and lead toward conversion with logic, empathy, and clear architecture.
+The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing facts, discounts, or policy interpretations.
 
 ### RULES THE AGENT MUST FOLLOW
-1. Discovery first: open-ended clarifying questions about goals, workflows, niche before heavy product pitch.
-2. Outcome vs Feature: never flat \"no\"; map missing features to JetEngine + other tools solutions.
-3. Power pairs & bundles: group plugins by business scenario; build value before price.
-4. Personalization & social proof when natural.
-5. 7-Element Conversion Checklist (use when commercial moment appears):
-   - Upsell / Cross-sell (All-Inclusive vs separate)
-   - Clear pricing & totals (math)
-   - Subtle FOMO (promo timing)
-   - Direct CTA / links
-   - Risk reversal (30-day money-back)
-   - Support team value
-   - Defined next steps
+1. Discovery first: open-ended clarifying questions about goals, workflows, and architecture before a heavy product pitch.
+   - For multi-provider booking/directory platforms, good discovery asks how providers work (own availability/services/calendars? self-manage bookings or central admin?).
+   - Do NOT penalize for missing questions that do not affect product/plan choice (e.g. generic traffic volume is often optional).
+2. Outcome vs Feature: never a flat \"no\"; map missing features to JetEngine + other tools when realistic.
+3. Power pairs & bundles: group plugins by the client's business scenario; build value before price.
+4. Personalization when natural.
+5. Conversion checklist (apply when a commercial moment appears — not mechanically in every reply):
+   - Upsell / Cross-sell — relevant additional plugins tied to the use case; All-Inclusive vs separate when relevant.
+   - Clear Pricing & Totals — exact calculations when pricing is discussed.
+   - Promotion / FOMO — ONLY when a legitimate active promotion or real deadline exists. NEVER invent discounts, urgency, scarcity, or expiration dates.
+   - Direct CTA — clear next action or relevant purchase/pricing link (lead the conversation; avoid only \"if you'd like / if you tell me\").
+   - Risk Reversal — mention the 30-day refund policy when it reduces hesitation; do not over-interpret eligibility beyond official terms.
+   - Support Value — mention support when relevant to complexity or risk.
+   - Defined Next Steps — clearly recommend what the client should do next.
+6. Factual & Policy Accuracy (mandatory):
+   - NEVER invent or assume pricing, discounts, licensing rights, refund eligibility, support terms, activation limits, or product capabilities.
+   - Distinguish using a license on a client project vs transferring/reselling a license. Never imply resale/transfer unless explicitly permitted.
+   - If policy details are uncertain, qualify the answer or point to official terms — do not invent certainty.
+   - Corrected blueprints must also obey this rule: no fictional discounts or fake FOMO.
 
-### SCORING (0–100 integers only)
-- Discovery & Requirements Gathering
-- Solution Architecture
-- Commercial Pitch & Conversion Checklist
-- Tone, Simplicity & Clarity
-- Overall Presale Score = average of the four above (round to nearest integer)
+### SCORING GUIDANCE (0–100 integers)
+- Discovery & Requirements Gathering: reward useful architecture questions; do not require irrelevant ones.
+- Solution Architecture: plugins mapped to needs; multi-provider complexity handled when present.
+- Commercial Pitch & Conversion Checklist: value + clear next step; missing CTA hurts more than missing FOMO when no promo exists. Invented FOMO/discounts in the chat (or in a blueprint) is a serious flaw.
+- Tone, Simplicity & Clarity: warm, clear, not overly long or jargon-heavy. Do not demand both \"stronger commercial close\" and \"much shorter\" in a contradictory way.
+- Overall Presale Score = average of the four above (round to nearest integer).
+- Do not heavily punish strong consultative discovery/architecture just because FOMO was absent when no real promotion applies.
 
 ### OUTPUT FORMAT — STRICT
 Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same line as the label so they can be parsed.
@@ -336,7 +380,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
 - **Overall Presale Score**: XX%
 
 **5. Corrected Response Blueprint**
-[Rewritten example of a strong agent reply that includes missing checklist elements]";
+[Rewritten strong agent reply. Must stay factually accurate: no invented discounts, deadlines, licensing claims, or policy guarantees. Prefer clear recommendation + next step + real risk reversal/support when relevant.]";
 
         $user_content = "SCENARIO:\n" . (is_array($scenario) ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : (string) $scenario)
             . "\n\nCHAT MESSAGES (assistant = client, user = agent):\n"
