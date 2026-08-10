@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.0
+ * Version: 0.4.2
  * Author: Immortal
  */
 
@@ -227,14 +227,17 @@ class Presale_Training_MVP {
             . "- NEVER offer solutions, recommend plugins, give pricing advice, or sound helpful like support.\n"
             . "- NEVER start sentences with \"I can help\", \"Let me recommend\", \"Based on your needs\" — that is agent language.\n"
             . "- Speak as a real person who is buying / evaluating, not as an AI.\n\n"
+            . "HOW TO REPLY (priority order):\n"
+            . "1. If the agent asked you clarifying questions about your project — ANSWER them first (briefly, 1–2 facts). Do not ignore discovery questions.\n"
+            . "2. Then you may ask ONE short follow-up of your own (price, plan, guarantee, licensing, competitor, timeline).\n"
+            . "3. Stay consistent with the scenario. Invent plausible details if needed (e.g. appointments for hairdressers, online payments yes/no).\n\n"
             . "Reply style:\n"
-            . "- Keep every reply SHORT: 1–3 sentences, preferably under 45 words.\n"
+            . "- Keep every reply SHORT: 1–3 sentences, preferably under 50 words.\n"
             . "- Always finish your sentence completely.\n"
             . "- Natural live-chat English only.\n"
             . "- Be mildly skeptical or cautious; do not buy instantly.\n"
-            . "- Sometimes mention budget, price comparison, All-Inclusive vs single plugins, licensing, refund, competitors (Elementor Pro, ACF, custom code), or timeline.\n"
-            . "- Ask concrete questions that let the agent talk about value, pricing math, bundles, FOMO, guarantee, or next steps.\n"
-            . "- Vary your questions: features + commercial angles (cost, plan choice, worth it?, multi-site, promo).\n\n"
+            . "- Over the whole chat, mix project details AND commercial questions (renewal, money-back, All-Inclusive vs separate, multi-site).\n"
+            . "- Do not only talk about price in every message — answer what was asked.\n\n"
             . "Current scenario (stay consistent with it):\n" . $scenario_text;
 
         $payload_messages = array_merge([
@@ -245,7 +248,7 @@ class Presale_Training_MVP {
             'model'       => self::get_roleplay_model(),
             'messages'    => $payload_messages,
             'temperature' => 0.75,
-            'max_tokens'  => 220,
+            'max_tokens'  => 280,
         ], true);
 
         // Light post-filter: if model slipped into agent role, reject and force retry-friendly error
@@ -878,17 +881,13 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         const data = await api('chat', { messages: state.messages, scenario: state.scenario });
 
         if (data.force_followup && data.system_notice) {
+            // Agent already answered the 5th client message → now client "disappears"
             state.messages.push({ role: 'system', content: data.system_notice });
             state.followupMode = true;
         } else if (data.message) {
+            // Normal client reply (1..5). Do NOT show follow-up notice yet —
+            // agent must still answer this last client message first.
             state.messages.push({ role: 'assistant', content: data.message });
-            if (countClientMessages() >= MAX_CLIENT) {
-                state.messages.push({
-                    role: 'system',
-                    content: 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок.'
-                });
-                state.followupMode = true;
-            }
         } else {
             state.messages.push({
                 role: 'assistant',
