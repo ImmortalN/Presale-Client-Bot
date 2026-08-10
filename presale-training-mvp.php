@@ -3,7 +3,7 @@
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
  * Version: 0.4.4
- * Author: Team
+ * Author: Immortal
  */
 
 if (!defined('ABSPATH')) {
