@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.2
- * Author: Immortal
+ * Version: 0.4.3
+ * Author: Team
  */
 
 if (!defined('ABSPATH')) {
@@ -700,7 +700,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
     }
 
     function renderMessages() {
-        messagesEl.innerHTML = state.messages.map(m => {
+        let html = state.messages.map(m => {
             if (m.role === 'system') {
                 return '<div class="pt-msg pt-msg-system"><div class="pt-msg-bubble"><strong>⚡ Система:</strong> ' + escapeHtml(m.content) + '</div></div>';
             }
@@ -711,6 +711,21 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                 '<div class="pt-label">' + (isCustomer ? 'Клієнт' : 'Ви') + '</div>' +
                 '<div class="pt-msg-bubble" style="' + style + '">' + escapeHtml(m.content) + '</div></div>';
         }).join('');
+
+        // Typing indicator while waiting for client reply
+        if (state.isLoading && !state.chatEnded && !state.followupMode && state.messages.length) {
+            const last = state.messages[state.messages.length - 1];
+            // After agent message, or while retrying a failed client reply
+            if (last.role === 'user' || (last.role === 'assistant' && String(last.content || '').indexOf('[Error]') === 0)) {
+                html += '<div class="pt-msg pt-msg-customer pt-typing" id="pt-typing-indicator">' +
+                    '<div class="pt-label">Клієнт друкує</div>' +
+                    '<div class="pt-msg-bubble pt-typing-bubble">' +
+                    '<span class="pt-dot"></span><span class="pt-dot"></span><span class="pt-dot"></span>' +
+                    '</div></div>';
+            }
+        }
+
+        messagesEl.innerHTML = html;
         messagesEl.scrollTop = messagesEl.scrollHeight;
         updateUI();
     }
@@ -722,6 +737,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             if (el) el.disabled = isLoading;
         });
         if (inputEl) inputEl.disabled = isLoading || state.chatEnded;
+        renderMessages();
         updateUI();
     }
 
@@ -1022,6 +1038,15 @@ JSBASE;
         .pt-msg-agent .pt-msg-bubble { background: #2271b1; color: #fff; }
         .pt-msg-system .pt-msg-bubble { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center; }
         .pt-label { font-size: 13px; color: #666; margin-bottom: 4px; }
+        .pt-typing-bubble { display: flex; align-items: center; gap: 5px; min-width: 52px; padding: 14px 16px !important; }
+        .pt-dot { width: 7px; height: 7px; border-radius: 50%; background: #999; display: inline-block;
+            animation: pt-bounce 1.2s infinite ease-in-out; }
+        .pt-dot:nth-child(2) { animation-delay: 0.15s; }
+        .pt-dot:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes pt-bounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+            30% { transform: translateY(-5px); opacity: 1; }
+        }
         </style>
 
         <script>
@@ -1075,6 +1100,15 @@ JSBASE;
         .pt-msg-system { align-self: center; max-width: 92%; }
         .pt-msg-system .pt-msg-bubble { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center; }
         .pt-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+        .pt-typing-bubble { display: flex; align-items: center; gap: 5px; min-width: 52px; padding: 12px 14px !important; }
+        .pt-dot { width: 7px; height: 7px; border-radius: 50%; background: #999; display: inline-block;
+            animation: pt-bounce 1.2s infinite ease-in-out; }
+        .pt-dot:nth-child(2) { animation-delay: 0.15s; }
+        .pt-dot:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes pt-bounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+            30% { transform: translateY(-5px); opacity: 1; }
+        }
 
         .pt-scenario-box { flex: 1; overflow: auto; background: #f6f7f7; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.5; margin-bottom: 14px; }
         .pt-eval-box { max-height: 280px; overflow: auto; background: #f0f0f1; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; font-size: 13px; }
