@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.4
+ * Version: 0.4.7
  * Author: Immortal
  */
 
@@ -329,10 +329,10 @@ class Presale_Training_MVP {
         $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology.
 
 ### CORE PRESALE PHILOSOPHY
-The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing facts, discounts, or policy interpretations.
+The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing unauthorized facts, discounts, or policy interpretations. Approved internal policies (up to 10% discount on most expensive plans, locked renewal price) are allowed.
 
 ### RULES THE AGENT MUST FOLLOW
-1. Discovery first: open-ended clarifying questions about goals, workflows, and architecture before a heavy product pitch.
+1. Discovery first — ideally already in the FIRST agent reply: open-ended clarifying questions about goals, workflows, and architecture before a heavy product pitch. Empty greetings like only \"Hi, how can I help?\" without substance lower the Discovery score.
    - For multi-provider booking/directory platforms, good discovery asks how providers work (own availability/services/calendars? self-manage bookings or central admin?).
    - Do NOT penalize for missing questions that do not affect product/plan choice (e.g. generic traffic volume is often optional).
 2. Outcome vs Feature: never a flat \"no\"; map missing features to JetEngine + other tools when realistic.
@@ -341,21 +341,27 @@ The agent must act as a Solution Architect and Consultant, not a static informat
 5. Conversion checklist (apply when a commercial moment appears — not mechanically in every reply):
    - Upsell / Cross-sell — relevant additional plugins tied to the use case; All-Inclusive vs separate when relevant.
    - Clear Pricing & Totals — exact calculations when pricing is discussed.
-   - Promotion / FOMO — ONLY when a legitimate active promotion or real deadline exists. NEVER invent discounts, urgency, scarcity, or expiration dates.
+   - Promotion / FOMO — ONLY when a legitimate active promotion or real deadline exists, OR when using the approved internal policy of up to 10% discount on the most expensive plans. NEVER invent higher discounts, promo codes, urgency, scarcity, or expiration dates.
    - Direct CTA — clear next action or relevant purchase/pricing link (lead the conversation; avoid only \"if you'd like / if you tell me\").
    - Risk Reversal — mention the 30-day refund policy when it reduces hesitation; do not over-interpret eligibility beyond official terms.
    - Support Value — mention support when relevant to complexity or risk.
    - Defined Next Steps — clearly recommend what the client should do next.
 6. Factual & Policy Accuracy (mandatory):
-   - NEVER invent or assume pricing, discounts, licensing rights, refund eligibility, support terms, activation limits, or product capabilities.
+   - NEVER invent discounts higher than the approved limit, fake promo codes, non-existent deadlines, licensing rights, refund eligibility, support terms, activation limits, or product capabilities.
    - Distinguish using a license on a client project vs transferring/reselling a license. Never imply resale/transfer unless explicitly permitted.
    - If policy details are uncertain, qualify the answer or point to official terms — do not invent certainty.
    - Corrected blueprints must also obey this rule: no fictional discounts or fake FOMO.
+   - ALLOWED (do NOT penalize these as factual errors):
+     • Offering up to 10% discount on the most expensive plans (Lifetime, Unlimited Plus / high-tier annual plans) when appropriate for the deal. This is an approved internal policy.
+     • Stating that renewal price is locked to the price the client paid at the moment of purchase (the client continues paying the same renewal amount).
+     • Real arithmetic value comparisons (e.g. All-Inclusive vs buying plugins + JetFormBuilder PRO add-ons separately, including typical ~$49 differences when relevant).
+     • Mentioning that All-Inclusive includes JetFormBuilder PRO + add-ons for the first year (standard current entitlement).
+   - Still penalize heavily: inventing discounts >10%, inventing promo codes, claiming discounts on cheaper plans without basis, inventing urgency/scarcity that does not exist, or inventing licensing/refund rules.
 
 ### SCORING GUIDANCE (0–100 integers)
 - Discovery & Requirements Gathering: reward useful architecture questions; do not require irrelevant ones.
 - Solution Architecture: plugins mapped to needs; multi-provider complexity handled when present.
-- Commercial Pitch & Conversion Checklist: value + clear next step; missing CTA hurts more than missing FOMO when no promo exists. Invented FOMO/discounts in the chat (or in a blueprint) is a serious flaw.
+- Commercial Pitch & Conversion Checklist: value + clear next step; missing CTA hurts more than missing FOMO when no promo exists. Invented FOMO or unauthorized discounts in the chat (or in a blueprint) is a serious flaw. Approved 10% discount on expensive plans and locked-renewal statements are NOT flaws.
 - Tone, Simplicity & Clarity: warm, clear, not overly long or jargon-heavy. Do not demand both \"stronger commercial close\" and \"much shorter\" in a contradictory way.
 - Overall Presale Score = average of the four above (round to nearest integer).
 - Do not heavily punish strong consultative discovery/architecture just because FOMO was absent when no real promotion applies.
@@ -380,7 +386,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
 - **Overall Presale Score**: XX%
 
 **5. Corrected Response Blueprint**
-[Rewritten strong agent reply. Must stay factually accurate: no invented discounts, deadlines, licensing claims, or policy guarantees. Prefer clear recommendation + next step + real risk reversal/support when relevant.]";
+[Rewritten strong agent reply. Must stay factually accurate: no invented discounts beyond the approved 10% on expensive plans, no fake deadlines, licensing claims, or policy guarantees. Locked renewal price and real value comparisons are allowed. Prefer clear recommendation + next step + real risk reversal/support when relevant.]";
 
         $user_content = "SCENARIO:\n" . (is_array($scenario) ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : (string) $scenario)
             . "\n\nCHAT MESSAGES (assistant = client, user = agent):\n"
@@ -706,6 +712,71 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         return String(str || '').replace(/[&<>"']/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[t]));
     }
 
+    // Allow safe subset of HTML in agent messages (from WYSIWYG)
+    function sanitizeHtml(html) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = String(html || '');
+        const allowed = { B:1, STRONG:1, I:1, EM:1, U:1, P:1, BR:1, UL:1, OL:1, LI:1, A:1, DIV:1, SPAN:1 };
+        const walk = (node) => {
+            const children = Array.from(node.childNodes);
+            children.forEach(child => {
+                if (child.nodeType === 1) {
+                    if (!allowed[child.tagName]) {
+                        while (child.firstChild) node.insertBefore(child.firstChild, child);
+                        node.removeChild(child);
+                        return;
+                    }
+                    Array.from(child.attributes).forEach(attr => {
+                        const n = attr.name.toLowerCase();
+                        if (child.tagName === 'A' && n === 'href') {
+                            const href = child.getAttribute('href') || '';
+                            if (!/^(https?:|mailto:|#)/i.test(href)) child.removeAttribute('href');
+                            child.setAttribute('target', '_blank');
+                            child.setAttribute('rel', 'noopener noreferrer');
+                        } else if (n === 'style' || n === 'class' || n.indexOf('on') === 0) {
+                            child.removeAttribute(attr.name);
+                        }
+                    });
+                    walk(child);
+                }
+            });
+        };
+        walk(tmp);
+        return tmp.innerHTML;
+    }
+
+    function formatMessageContent(content, isAgent) {
+        const raw = String(content || '');
+        if (isAgent && /<[a-z][\s\S]*>/i.test(raw)) {
+            return sanitizeHtml(raw);
+        }
+        // Plain text: preserve paragraphs/newlines
+        return escapeHtml(raw).replace(/\n/g, '<br>');
+    }
+
+    function getInputHtml() {
+        if (!inputEl) return '';
+        return sanitizeHtml(inputEl.innerHTML || '');
+    }
+
+    function getInputText() {
+        if (!inputEl) return '';
+        return (inputEl.innerText || inputEl.textContent || '').replace(/\u00a0/g, ' ').trim();
+    }
+
+    function clearInput() {
+        if (!inputEl) return;
+        inputEl.innerHTML = '';
+    }
+
+    function setInputEnabled(enabled) {
+        if (!inputEl) return;
+        inputEl.contentEditable = enabled ? 'true' : 'false';
+        inputEl.style.opacity = enabled ? '1' : '0.6';
+        const tb = document.getElementById('pt-editor-toolbar');
+        if (tb) tb.style.pointerEvents = enabled ? '' : 'none';
+    }
+
     function countClientMessages() {
         return state.messages.filter(m => m.role === 'assistant').length;
     }
@@ -732,13 +803,13 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             evaluateBtn.disabled = state.isLoading;
         }
         if (inputEl) {
-            inputEl.disabled = state.isLoading || state.chatEnded;
+            setInputEnabled(!(state.isLoading || state.chatEnded));
             if (state.followupMode && !state.chatEnded) {
-                inputEl.placeholder = 'Напишіть фолоуап (підсумок + наступний крок)...';
+                inputEl.setAttribute('data-placeholder', 'Напишіть фолоуап (підсумок + наступний крок)...');
             } else if (state.chatEnded) {
-                inputEl.placeholder = 'Чат завершено. Можна оцінити ще раз або почати новий сценарій.';
+                inputEl.setAttribute('data-placeholder', 'Чат завершено. Можна оцінити ще раз або почати новий сценарій.');
             } else {
-                inputEl.placeholder = 'Введіть відповідь як presale-агент...';
+                inputEl.setAttribute('data-placeholder', 'Введіть відповідь як presale-агент...');
             }
         }
     }
@@ -751,9 +822,10 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             const isCustomer = m.role === 'assistant';
             const isError = isCustomer && String(m.content || '').indexOf('[Error]') === 0;
             const style = isError ? 'border:1px solid #d63638;background:#fcf0f1;' : '';
+            const body = isError ? escapeHtml(m.content) : formatMessageContent(m.content, !isCustomer);
             return '<div class="pt-msg ' + (isCustomer ? 'pt-msg-customer' : 'pt-msg-agent') + '">' +
                 '<div class="pt-label">' + (isCustomer ? 'Клієнт' : 'Ви') + '</div>' +
-                '<div class="pt-msg-bubble" style="' + style + '">' + escapeHtml(m.content) + '</div></div>';
+                '<div class="pt-msg-bubble" style="' + style + '">' + body + '</div></div>';
         }).join('');
 
         // Typing indicator while waiting for client reply
@@ -780,7 +852,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             const el = document.getElementById(id);
             if (el) el.disabled = isLoading;
         });
-        if (inputEl) inputEl.disabled = isLoading || state.chatEnded;
+        setInputEnabled(!(isLoading || state.chatEnded));
         renderMessages();
         updateUI();
     }
@@ -920,11 +992,12 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
     }
 
     async function sendMessage() {
-        const text = inputEl.value.trim();
-        if (!text || state.isLoading || state.chatEnded) return;
+        const plain = getInputText();
+        if (!plain || state.isLoading || state.chatEnded) return;
+        const html = getInputHtml();
 
-        state.messages.push({ role: 'user', content: text });
-        inputEl.value = '';
+        state.messages.push({ role: 'user', content: html || plain });
+        clearInput();
         renderMessages();
         setLoading(true);
 
@@ -982,12 +1055,32 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
     if (sendBtn) sendBtn.addEventListener('click', sendMessage);
     if (inputEl) {
         inputEl.addEventListener('keydown', e => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            // Ctrl/Cmd+Enter — send; Enter alone — new paragraph in editor
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 sendMessage();
             }
         });
     }
+
+    // WYSIWYG toolbar
+    const toolbar = document.getElementById('pt-editor-toolbar');
+    if (toolbar) {
+        toolbar.addEventListener('click', e => {
+            const btn = e.target.closest('[data-cmd]');
+            if (!btn || state.isLoading || state.chatEnded) return;
+            e.preventDefault();
+            const cmd = btn.getAttribute('data-cmd');
+            inputEl.focus();
+            if (cmd === 'createLink') {
+                const url = window.prompt('URL посилання (https://...)', 'https://');
+                if (url) document.execCommand('createLink', false, url);
+            } else {
+                document.execCommand(cmd, false, null);
+            }
+        });
+    }
+
     if (retryBtn) retryBtn.addEventListener('click', retryClientReply);
 
     if (evaluateBtn) {
@@ -1050,7 +1143,17 @@ JSBASE;
                 <div style="flex:1; background:#fff; border:1px solid #c3c4c7; border-radius:8px; display:flex; flex-direction:column; min-width:0;">
                     <div id="messages" style="flex:1; overflow:auto; padding:20px; background:#f9f9f9; border-bottom:1px solid #c3c4c7; display:flex; flex-direction:column; gap:16px;"></div>
                     <div style="padding:16px;">
-                        <textarea id="agent-input" style="width:100%; min-height:110px; resize:vertical; padding:12px; font-size:15px;" placeholder="Введіть відповідь як presale-агент..."></textarea>
+                        <div class="pt-editor-wrap">
+                            <div class="pt-editor-toolbar" id="pt-editor-toolbar">
+                                <button type="button" class="pt-tb-btn" data-cmd="bold" title="Жирний"><b>B</b></button>
+                                <button type="button" class="pt-tb-btn" data-cmd="italic" title="Курсив"><i>I</i></button>
+                                <button type="button" class="pt-tb-btn" data-cmd="insertUnorderedList" title="Список">• List</button>
+                                <button type="button" class="pt-tb-btn" data-cmd="insertOrderedList" title="Нумерований">1. List</button>
+                                <button type="button" class="pt-tb-btn" data-cmd="createLink" title="Посилання">🔗</button>
+                                <span class="pt-tb-hint">Enter — новий рядок · Ctrl+Enter — відправити</span>
+                            </div>
+                            <div id="agent-input" class="pt-editor" contenteditable="true" data-placeholder="Введіть відповідь як presale-агент..." role="textbox" aria-multiline="true"></div>
+                        </div>
                         <div style="margin-top: 12px; display: flex; gap: 10px; flex-wrap:wrap;">
                             <button class="button button-primary" id="send-btn">Відправити</button>
                             <button class="button" id="retry-client-btn" style="display:none; border-color:#d63638; color:#d63638;">↻ Повторити відповідь клієнта</button>
@@ -1082,6 +1185,22 @@ JSBASE;
         .pt-msg-agent .pt-msg-bubble { background: #2271b1; color: #fff; }
         .pt-msg-system .pt-msg-bubble { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center; }
         .pt-label { font-size: 13px; color: #666; margin-bottom: 4px; }
+        .pt-editor-wrap { border: 1px solid #c3c4c7; border-radius: 8px; background: #fff; overflow: hidden; }
+        .pt-editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; background: #f6f7f7; border-bottom: 1px solid #e0e0e0; }
+        .pt-tb-btn { border: 1px solid #c3c4c7; background: #fff; border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 13px; line-height: 1.2; }
+        .pt-tb-btn:hover { background: #eef2f5; }
+        .pt-tb-hint { margin-left: auto; font-size: 11px; color: #888; }
+        .pt-editor { min-height: 110px; max-height: 220px; overflow: auto; padding: 12px; font-size: 15px; line-height: 1.45; outline: none; }
+        .pt-editor:empty:before { content: attr(data-placeholder); color: #999; pointer-events: none; }
+        .pt-editor p { margin: 0 0 0.55em; }
+        .pt-editor p:last-child { margin-bottom: 0; }
+        .pt-editor ul, .pt-editor ol { margin: 0.3em 0 0.55em 1.2em; padding: 0; }
+        .pt-editor a { color: #135e96; }
+        .pt-msg-bubble p { margin: 0 0 0.5em; }
+        .pt-msg-bubble p:last-child { margin-bottom: 0; }
+        .pt-msg-bubble ul, .pt-msg-bubble ol { margin: 0.25em 0 0.5em 1.15em; padding: 0; }
+        .pt-msg-bubble a { color: inherit; text-decoration: underline; }
+        .pt-msg-agent .pt-msg-bubble a { color: #c8e1ff; }
         .pt-typing-bubble { display: flex; align-items: center; gap: 5px; min-width: 52px; padding: 14px 16px !important; }
         .pt-dot { width: 7px; height: 7px; border-radius: 50%; background: #999; display: inline-block;
             animation: pt-bounce 1.2s infinite ease-in-out; }
@@ -1127,7 +1246,21 @@ JSBASE;
         .pt-chat { flex: 1; background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; display: flex; flex-direction: column; min-width: 0; }
         .pt-messages { flex: 1; overflow: auto; padding: 20px; background: #f7f8f9; display: flex; flex-direction: column; gap: 14px; border-radius: 12px 12px 0 0; }
         .pt-input-area { padding: 16px; border-top: 1px solid #eee; }
-        .pt-input-area textarea { width: 100%; min-height: 90px; padding: 12px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; resize: vertical; font-family: inherit; }
+        .pt-input-area .pt-editor-wrap { border: 1px solid #ccc; border-radius: 8px; background: #fff; overflow: hidden; }
+        .pt-editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; background: #f6f7f7; border-bottom: 1px solid #e5e5e5; }
+        .pt-tb-btn { border: 1px solid #ccc; background: #fff; border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 13px; line-height: 1.2; }
+        .pt-tb-btn:hover { background: #eef2f5; }
+        .pt-tb-hint { margin-left: auto; font-size: 11px; color: #888; }
+        .pt-editor { min-height: 90px; max-height: 200px; overflow: auto; padding: 12px; font-size: 15px; line-height: 1.45; outline: none; font-family: inherit; }
+        .pt-editor:empty:before { content: attr(data-placeholder); color: #999; pointer-events: none; }
+        .pt-editor p { margin: 0 0 0.55em; }
+        .pt-editor p:last-child { margin-bottom: 0; }
+        .pt-editor ul, .pt-editor ol { margin: 0.3em 0 0.55em 1.2em; padding: 0; }
+        .pt-msg-bubble p { margin: 0 0 0.5em; }
+        .pt-msg-bubble p:last-child { margin-bottom: 0; }
+        .pt-msg-bubble ul, .pt-msg-bubble ol { margin: 0.25em 0 0.5em 1.15em; padding: 0; }
+        .pt-msg-bubble a { color: inherit; text-decoration: underline; }
+        .pt-msg-agent .pt-msg-bubble a { color: #c8e1ff; }
         .pt-buttons { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
         .pt-btn { padding: 10px 18px; border-radius: 6px; border: 1px solid #ccc; background: #f0f0f1; cursor: pointer; font-size: 14px; }
         .pt-btn-primary { background: #2271b1; color: #fff; border-color: #2271b1; }
@@ -1241,7 +1374,17 @@ JSBASE;
                 <div class="pt-chat">
                     <div id="messages" class="pt-messages"></div>
                     <div class="pt-input-area">
-                        <textarea id="agent-input" placeholder="Введіть відповідь як presale-агент..."></textarea>
+                        <div class="pt-editor-wrap">
+                            <div class="pt-editor-toolbar" id="pt-editor-toolbar">
+                                <button type="button" class="pt-tb-btn" data-cmd="bold" title="Жирний"><b>B</b></button>
+                                <button type="button" class="pt-tb-btn" data-cmd="italic" title="Курсив"><i>I</i></button>
+                                <button type="button" class="pt-tb-btn" data-cmd="insertUnorderedList" title="Список">• List</button>
+                                <button type="button" class="pt-tb-btn" data-cmd="insertOrderedList" title="Нумерований">1. List</button>
+                                <button type="button" class="pt-tb-btn" data-cmd="createLink" title="Посилання">🔗</button>
+                                <span class="pt-tb-hint">Enter — новий рядок · Ctrl+Enter — відправити</span>
+                            </div>
+                            <div id="agent-input" class="pt-editor" contenteditable="true" data-placeholder="Введіть відповідь як presale-агент..." role="textbox" aria-multiline="true"></div>
+                        </div>
                         <div class="pt-buttons">
                             <button class="pt-btn pt-btn-primary" id="send-btn">Відправити</button>
                             <button class="pt-btn pt-btn-retry" id="retry-client-btn" style="display:none;">↻ Повторити відповідь клієнта</button>
