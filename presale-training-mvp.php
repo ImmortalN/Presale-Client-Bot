@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.8
+ * Version: 0.4.9
  * Author: Immortal
  */
 
@@ -164,15 +164,21 @@ class Presale_Training_MVP {
 
     public static function handle_start_request() {
         $scenario_prompt = "Generate ONE realistic presale customer scenario for Crocoblock.\n\n"
+            . "LANGUAGE: English only for first_message and all text fields.\n\n"
             . "DIVERSITY RULE (critical): Most real clients come for JetEngine (directories, CPTs, relations), JetSmartFilters, JetFormBuilder, listings, membership/user dashboards, or All-Inclusive value — NOT booking.\n"
-            . "Booking / appointments / JetBooking should appear in at most ~20% of scenarios. Prefer non-booking use cases the majority of the time.\n\n"
-            . "Possible use-case families (pick one, vary across generations):\n"
+            . "Booking / appointments / JetBooking / calendar scheduling should appear in at most ~20% of scenarios. Prefer non-booking use cases the majority of the time.\n\n"
+            . "Possible use-case families (pick ONE, strongly prefer non-booking):\n"
             . "- JetEngine directory / listings / custom post types / relations\n"
             . "- JetSmartFilters + search/filter UX on a catalog or directory\n"
             . "- JetFormBuilder (application forms, multi-step, payments, user-generated content)\n"
             . "- User dashboard / membership / profile pages\n"
             . "- All-Inclusive vs separate plugins (value / renewal)\n"
-            . "- Occasional: booking / appointments (keep rare)\n\n"
+            . "- Occasional only: booking / appointments\n\n"
+            . "MOOD VARIETY (important): In about 25–30% of scenarios use a harder client mood so agents practice non-ideal chats:\n"
+            . "- impatient / price-first (wants price immediately, short answers, may skip discovery)\n"
+            . "- already-decided (knows the product, asks plan/price, resists extra questions)\n"
+            . "- skeptical / competitor-aware\n"
+            . "Otherwise use cooperative moods (interested, budget-conscious, curious).\n\n"
             . "The customer should have a concrete project and natural reasons to discuss PRICING, plans (single plugins vs All-Inclusive), value, licensing, or comparisons — not only pure feature questions.\n\n"
             . "Return ONLY valid JSON with these exact keys:\n"
             . "- customer_type (string)\n"
@@ -182,22 +188,47 @@ class Presale_Training_MVP {
             . "- first_message (string: short, natural, 1–2 sentences, in English; should open room for discovery AND later commercial talk)\n\n"
             . "No explanations, no markdown, no code blocks.";
 
-        $response = self::openrouter_chat([
-            'model'       => self::get_roleplay_model(),
-            'messages'    => [['role' => 'user', 'content' => $scenario_prompt]],
-            'temperature' => 0.9,
-            'max_tokens'  => 400,
-        ], true);
+        $scenario = null;
+        $raw = '';
+        $max_attempts = 2;
+        for ($attempt = 0; $attempt < $max_attempts; $attempt++) {
+            $response = self::openrouter_chat([
+                'model'       => self::get_roleplay_model(),
+                'messages'    => [['role' => 'user', 'content' => $scenario_prompt]],
+                'temperature' => 0.9,
+                'max_tokens'  => 400,
+            ], true);
 
-        if (isset($response['error'])) {
-            return new WP_REST_Response(['error' => $response['error']], 500);
+            if (isset($response['error'])) {
+                if ($attempt === $max_attempts - 1) {
+                    return new WP_REST_Response(['error' => $response['error']], 500);
+                }
+                continue;
+            }
+
+            $raw = $response['message'];
+            $scenario = self::extract_scenario($raw);
+
+            // Soft reject pure booking scenarios on first attempt to force diversity
+            $use_case = strtolower((string) ($scenario['use_case'] ?? ''));
+            $first_msg = strtolower((string) ($scenario['first_message'] ?? ''));
+            $blob = $use_case . ' ' . $first_msg;
+            $is_booking = (bool) preg_match('/\b(booking|appointment|jetbooking|calendar scheduling|book a service)\b/i', $blob);
+            if ($is_booking && $attempt < $max_attempts - 1) {
+                // Retry once to prefer non-booking
+                $scenario = null;
+                continue;
+            }
+            break;
         }
 
-        $scenario = self::extract_scenario($response['message']);
+        if (!$scenario) {
+            $scenario = self::extract_scenario('');
+        }
 
         return rest_ensure_response([
             'scenario' => $scenario,
-            'raw'      => $response['message'],
+            'raw'      => $raw,
         ]);
     }
 
@@ -221,7 +252,7 @@ class Presale_Training_MVP {
         if ($client_messages >= self::MAX_CLIENT_MESSAGES) {
             return rest_ensure_response([
                 'message'        => null,
-                'system_notice'  => 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте те, що обговорювали, і запропонуйте наступний крок (лінк на прайси / консультацію).',
+                'system_notice'  => 'Клієнт перестав відповідати. Напишіть фолоуап: коротко нагадайте про себе, підсумуйте ключові моменти обговорення (план, ціна, що підходить під задачу) і м’яко запропонуйте допомогу з покупкою або відповідь на залишені питання — без жорсткого checkout-лінка.',
                 'force_followup' => true,
             ]);
         }
@@ -242,16 +273,18 @@ class Presale_Training_MVP {
             . "- NEVER start sentences with \"I can help\", \"Let me recommend\", \"Based on your needs\" — that is agent language.\n"
             . "- Speak as a real person who is buying / evaluating, not as an AI.\n\n"
             . "HOW TO REPLY (priority order):\n"
-            . "1. If the agent asked clarifying questions about your project — ANSWER them first (briefly, 1–2 facts). Do not ignore discovery questions.\n"
+            . "1. Stay consistent with the scenario mood.\n"
+            . "   - If mood is impatient / price-first / already-decided: answer discovery questions very briefly (or push back politely: \"I mainly need the price for now\"), and keep steering toward plan/price. You may skip giving rich project details.\n"
+            . "   - Otherwise: if the agent asked clarifying questions — ANSWER them first (briefly, 1–2 facts). Do not ignore discovery questions.\n"
             . "2. Then you may ask ONE short follow-up of your own (price, plan, guarantee, licensing, competitor, timeline).\n"
-            . "3. Stay consistent with the scenario. Invent plausible details if needed (e.g. appointments for hairdressers, online payments yes/no).\n\n"
+            . "3. Invent plausible details if needed (e.g. directory of local shops, filters by city, multi-step application form).\n\n"
             . "Reply style:\n"
             . "- Keep every reply SHORT: 1–3 sentences, preferably under 50 words.\n"
             . "- Always finish your sentence completely.\n"
             . "- Natural live-chat English only.\n"
-            . "- Be mildly skeptical or cautious; do not buy instantly.\n"
-            . "- Over the whole chat, mix project details AND commercial questions (renewal, money-back, All-Inclusive vs separate, multi-site).\n"
-            . "- Do not only talk about price in every message — answer what was asked.\n\n"
+            . "- Do not buy instantly.\n"
+            . "- Over the whole chat, mix project details AND commercial questions when mood allows (renewal, money-back, All-Inclusive vs separate, multi-site).\n"
+            . "- Do not only talk about price in every message unless mood is price-first / already-decided.\n\n"
             . "Current scenario (stay consistent with it):\n" . $scenario_text;
 
         $payload_messages = array_merge([
@@ -335,7 +368,7 @@ class Presale_Training_MVP {
             return new WP_REST_Response(['error' => 'Будь ласка, вкажіть свій нік / ім’я агента'], 400);
         }
 
-        $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology.
+        $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology. Language of the chat is English.
 
 ### CORE PRESALE PHILOSOPHY
 The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing unauthorized facts, discounts, or policy interpretations. Approved internal policies (up to 10% discount on most expensive plans, locked renewal price) are allowed, but only when they help the deal.
@@ -343,36 +376,46 @@ The agent must act as a Solution Architect and Consultant, not a static informat
 ### RULES THE AGENT MUST FOLLOW
 1. Discovery — useful, not ritualistic:
    - Reward clarifying questions that actually affect product/plan choice or architecture (goals, content structure, who creates content, filters needed, forms vs CPT, multi-user roles, etc.).
-   - If the client already stated a clear need and is asking about price/plan, do NOT require deep workflow interrogation (e.g. detailed booking provider calendars) just to \"check the discovery box\".
+   - If the client already stated a clear need and is asking about price/plan, do NOT require deep workflow interrogation.
    - Empty greetings like only \"Hi, how can I help?\" without substance still lower the Discovery score.
-   - Do NOT invent discovery gaps the client never opened (e.g. \"should have asked about ACF + BookingPress\" when the client never mentioned third-party plugins or alternatives).
+   - Do NOT invent discovery gaps the client never opened (e.g. third-party plugin comparisons the client never mentioned).
+   - GOOD example: Client says \"I need a directory of local businesses with city filters, budget around \$400\" → agent briefly confirms (CPT + filters + listing pages) and moves to plan recommendation. High discovery is possible with 1–2 focused questions.
+   - BAD example: Same client → agent asks five rounds about provider calendars, staff roles, and payment gateways before any price talk. Over-interrogation when the need is already clear.
+   - GOOD example (price-first mood): Client pushes for price only → agent gives a short architecture check (1 question) then clear plan + price. Do not punish missing deep discovery when the client refuses it.
 2. Outcome vs Feature: never a flat \"no\"; map missing features to JetEngine + other tools when realistic.
 3. Power pairs & bundles: group plugins by the client's business scenario; build value before price.
 4. Personalization when natural.
 5. Conversion checklist (apply when a commercial moment appears — not mechanically in every reply):
    - Upsell / Cross-sell — relevant additional plugins tied to the use case; All-Inclusive vs separate when relevant.
    - Clear Pricing & Totals — exact calculations when pricing is discussed.
-   - Promotion / FOMO / Discount — ONLY when it helps close a hesitant deal. If the client is already satisfied with the price and is within budget, NOT offering the internal 10% discount is correct and must NOT be scored as a miss. NEVER invent higher discounts, promo codes, urgency, scarcity, or expiration dates.
-   - Soft next step / help with purchase — offer help if the client wants to buy (e.g. \"Need any help with the purchase?\" or \"I can walk you through adding the plan if you want\"). Do NOT require or reward hard checkout links / cart URLs. Clients add the subscription to the cart themselves; a pushy checkout link is inappropriate.
-   - Risk Reversal — mention the 30-day refund policy when it reduces hesitation; do not over-interpret eligibility beyond official terms.
+   - Promotion / FOMO / Discount — ONLY when it helps close a hesitant deal.
+     • GOOD: Client says \"\$399 is a bit high for me\" → offering up to 10% on the expensive plan is appropriate.
+     • BAD / not a miss: Client is happy with All-Inclusive at \$399 and budget was \$400 → NOT offering 10% is correct. Do not list \"missed discount\" as an improvement.
+     • NEVER invent higher discounts, promo codes, urgency, scarcity, or expiration dates.
+   - Soft next step / help with purchase — e.g. \"Need any help with the purchase?\" or \"I can walk you through adding the plan if you want\". Do NOT require or reward hard checkout / cart URLs. Clients add the subscription themselves; a pushy checkout link is inappropriate.
+   - Risk Reversal — mention the 30-day refund policy when it reduces hesitation.
    - Support Value — mention support when relevant to complexity or risk.
-   - Defined Next Steps — clearly recommend what the client should do next, without treating them as a money bag.
+6. Follow-up message (when present at the end of the chat):
+   - The follow-up is part of the same chat, not a separate score. Use it when judging Commercial Pitch, Tone, and Overall.
+   - A strong follow-up briefly reminds who you are, summarizes the key points discussed (recommended plan, price, why it fits), and offers soft help with the purchase or remaining questions.
+   - It is a valid place to add something the agent forgot in the live chat (refund policy, renewal lock, support value) — reward that when accurate.
+   - Do NOT demand a hard checkout link in the follow-up.
 
 ### FACTUAL ACCURACY (NON-NEGOTIABLE)
 - Allowed:
-  • Offering up to 10% discount on the most expensive plans (Lifetime, Unlimited Plus / high-tier annual plans) ONLY when the client shows price hesitation or the deal is stuck. If the client already accepts the price / is within budget, skipping the discount is fine and preferred.
-  • Stating that renewal price is locked to the price the client paid at the moment of purchase.
-  • Real arithmetic value comparisons (e.g. All-Inclusive vs buying plugins + JetFormBuilder PRO add-ons separately, including typical ~\$49 differences when relevant).
-  • Mentioning that All-Inclusive includes JetFormBuilder PRO + add-ons for the first year (standard current entitlement).
-- Still penalize heavily: inventing discounts >10%, inventing promo codes, claiming discounts on cheaper plans without basis, inventing urgency/scarcity, inventing licensing/refund rules, inventing competitor comparisons the client never raised.
+  • Up to 10% discount on the most expensive plans ONLY when the client shows price hesitation.
+  • Renewal price locked to the purchase-time price.
+  • Real arithmetic value comparisons (All-Inclusive vs separate plugins + JetFormBuilder PRO add-ons, typical ~\$49 differences when relevant).
+  • All-Inclusive includes JetFormBuilder PRO + add-ons for the first year.
+- Penalize heavily: discounts >10%, fake promo codes, urgency/scarcity, invented licensing/refund rules, invented competitor comparisons the client never raised.
 
 ### SCORING GUIDANCE (0–100 integers)
-- Discovery & Requirements Gathering: reward useful architecture questions that change the recommendation; do not require irrelevant ones or punish a short path when the client already decided and asked for price.
-- Solution Architecture: plugins mapped to needs; handle complexity only when it is present in the chat/scenario.
-- Commercial Pitch & Conversion Checklist: value + soft clear next step. Missing FOMO/discount is NOT a flaw when the client is already happy with the price. Hard checkout links are a weakness, not a strength. Soft \"need help with purchase?\" is enough.
-- Tone, Simplicity & Clarity: warm, clear, not overly long or jargon-heavy; not pushy or treating the client as an idiot who cannot reach checkout.
+- Discovery & Requirements Gathering: useful questions that change the recommendation; do not require irrelevant ones; do not punish a short path when the client already decided or is price-first.
+- Solution Architecture: plugins mapped to needs; handle complexity only when present in the chat/scenario.
+- Commercial Pitch & Conversion Checklist: value + soft clear next step. Missing discount is NOT a flaw when the client already accepts the price. Hard checkout links are a weakness. Soft \"need help with purchase?\" is enough. Factor the follow-up into this score when it exists (summary + soft next step + any accurate missed points recovered).
+- Tone, Simplicity & Clarity: warm, clear, not overly long, not pushy.
 - Overall Presale Score = average of the four above (round to nearest integer).
-- Do not invent improvement points the chat never supported (missing discount, missing third-party comparison, missing deep booking discovery when irrelevant).
+- Do not invent improvement points the chat never supported.
 
 ### OUTPUT FORMAT — STRICT
 Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same line as the label so they can be parsed.
@@ -385,6 +428,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
 
 **3. Opportunities for Improvement**
 - ...
+(First bullet should be the single most important miss / top miss if any.)
 
 **4. Scoring Matrix**
 - Discovery & Requirements Gathering: XX%
@@ -394,7 +438,8 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
 - **Overall Presale Score**: XX%
 
 **5. Corrected Response Blueprint**
-[Rewritten strong agent reply. Must stay factually accurate: no invented discounts beyond the approved 10% on expensive plans (and only if price hesitation exists), no fake deadlines, licensing claims, or policy guarantees. Locked renewal price and real value comparisons are allowed. Prefer clear recommendation + soft next step (help with purchase, not a hard checkout link) + real risk reversal/support when relevant.]";
+[Rewritten strong agent reply. Factually accurate: 10% discount only if price hesitation exists; no fake deadlines or policy inventions. Prefer clear recommendation + soft next step (help with purchase, not a hard checkout link) + real risk reversal/support when relevant.]";
+
 
 
         $user_content = "SCENARIO:\n" . (is_array($scenario) ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : (string) $scenario)
@@ -475,6 +520,28 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             }
         }
         return null;
+    }
+
+    /**
+     * First bullet under "Opportunities for Improvement" — used as Top miss in results table.
+     */
+    private static function extract_top_miss($feedback) {
+        $text = (string) $feedback;
+        if ($text === '') {
+            return '';
+        }
+        // Prefer content under Opportunities for Improvement
+        if (preg_match('/Opportunities for Improvement\s*\n(.*?)(?:\n\s*\*\*\d|\n\s*#|\n\s*Scoring Matrix|\z)/is', $text, $section)) {
+            $block = $section[1];
+            if (preg_match('/^[\s]*[-•*]\s*(.+)$/mu', $block, $bullet)) {
+                return trim($bullet[1]);
+            }
+        }
+        // Fallback: any first improvement-like bullet after "Improvement"
+        if (preg_match('/Improvement[^\n]*\n[\s]*[-•*]\s*(.+)/i', $text, $m)) {
+            return trim($m[1]);
+        }
+        return '';
     }
 
     private static function extract_scenario($text) {
@@ -565,27 +632,87 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             return;
         }
 
-        $results = $wpdb->get_results("SELECT * FROM $table_name ORDER BY id DESC LIMIT 100");
+        $filter_agent = isset($_GET['agent']) ? sanitize_text_field(wp_unslash($_GET['agent'])) : '';
+        $filter_min   = isset($_GET['min_score']) ? intval($_GET['min_score']) : '';
+        $filter_max   = isset($_GET['max_score']) ? intval($_GET['max_score']) : '';
+        if ($filter_min === 0 && !isset($_GET['min_score'])) {
+            $filter_min = '';
+        }
+        if ($filter_max === 0 && !isset($_GET['max_score'])) {
+            $filter_max = '';
+        }
+
+        $where  = ['1=1'];
+        $params = [];
+        if ($filter_agent !== '') {
+            $where[]  = 'agent_name = %s';
+            $params[] = $filter_agent;
+        }
+        if ($filter_min !== '' && $filter_min >= 0) {
+            $where[]  = 'overall_score >= %d';
+            $params[] = $filter_min;
+        }
+        if ($filter_max !== '' && $filter_max >= 0) {
+            $where[]  = 'overall_score <= %d';
+            $params[] = $filter_max;
+        }
+
+        $sql = "SELECT * FROM $table_name WHERE " . implode(' AND ', $where) . " ORDER BY id DESC LIMIT 200";
+        if (!empty($params)) {
+            $results = $wpdb->get_results($wpdb->prepare($sql, $params));
+        } else {
+            $results = $wpdb->get_results($sql);
+        }
+
+        $agents = $wpdb->get_col("SELECT DISTINCT agent_name FROM $table_name WHERE agent_name <> '' ORDER BY agent_name ASC");
         ?>
         <div class="wrap">
             <h1>Presale Training — Результати</h1>
-            <p class="description">Останні 100 оцінених діалогів. Натисніть «Деталі», щоб побачити повний фідбек і сценарій.</p>
+            <p class="description">Оцінені діалоги. Фільтруйте по агенту та overall score. «Top miss» — перший пункт з Opportunities for Improvement.</p>
+
+            <form method="get" style="margin:16px 0; display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+                <input type="hidden" name="page" value="presale-training-results" />
+                <div>
+                    <label for="pt-filter-agent" style="display:block; font-weight:600; margin-bottom:4px;">Агент</label>
+                    <select name="agent" id="pt-filter-agent">
+                        <option value="">Усі</option>
+                        <?php foreach ($agents as $agent) : ?>
+                            <option value="<?php echo esc_attr($agent); ?>" <?php selected($filter_agent, $agent); ?>>
+                                <?php echo esc_html($agent); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label for="pt-filter-min" style="display:block; font-weight:600; margin-bottom:4px;">Overall від</label>
+                    <input type="number" name="min_score" id="pt-filter-min" min="0" max="100" value="<?php echo $filter_min !== '' ? esc_attr($filter_min) : ''; ?>" style="width:80px;" />
+                </div>
+                <div>
+                    <label for="pt-filter-max" style="display:block; font-weight:600; margin-bottom:4px;">Overall до</label>
+                    <input type="number" name="max_score" id="pt-filter-max" min="0" max="100" value="<?php echo $filter_max !== '' ? esc_attr($filter_max) : ''; ?>" style="width:80px;" />
+                </div>
+                <div>
+                    <button type="submit" class="button button-primary">Фільтрувати</button>
+                    <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=presale-training-results')); ?>">Скинути</a>
+                </div>
+            </form>
 
             <?php if (empty($results)) : ?>
-                <p>Поки немає збережених результатів оцінювання.</p>
+                <p>Немає результатів за обраними фільтрами.</p>
             <?php else : ?>
-                <table class="wp-list-table widefat fixed striped" style="margin-top: 16px;">
+                <table class="wp-list-table widefat fixed striped" style="margin-top: 8px;">
                     <thead>
                         <tr>
                             <th style="width:50px;">ID</th>
                             <th style="width:140px;">Дата</th>
-                            <th>Агент</th>
-                            <th style="width:90px; text-align:center;">Overall</th>
-                            <th style="width:90px; text-align:center;">Discovery</th>
-                            <th style="width:90px; text-align:center;">Architecture</th>
-                            <th style="width:90px; text-align:center;">Commercial</th>
-                            <th style="width:80px; text-align:center;">Tone</th>
-                            <th style="width:100px;">Дії</th>
+                            <th style="width:120px;">Агент</th>
+                            <th style="width:80px; text-align:center;">Overall</th>
+                            <th style="width:80px; text-align:center;">Discovery</th>
+                            <th style="width:80px; text-align:center;">Architecture</th>
+                            <th style="width:80px; text-align:center;">Commercial</th>
+                            <th style="width:70px; text-align:center;">Tone</th>
+                            <th>Top miss</th>
+                            <th style="width:90px;">Дії</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -597,6 +724,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 elseif ($overall >= 60) $score_class = 'color:#dba617;font-weight:600;';
                                 else                   $score_class = 'color:#d63638;font-weight:600;';
                             }
+                            $top_miss = self::extract_top_miss($row->feedback ?? '');
                         ?>
                             <tr>
                                 <td><?php echo esc_html($row->id); ?></td>
@@ -609,6 +737,9 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 <td style="text-align:center;"><?php echo $row->architecture_score !== null ? esc_html($row->architecture_score) . '%' : '—'; ?></td>
                                 <td style="text-align:center;"><?php echo $row->commercial_score !== null ? esc_html($row->commercial_score) . '%' : '—'; ?></td>
                                 <td style="text-align:center;"><?php echo $row->tone_score !== null ? esc_html($row->tone_score) . '%' : '—'; ?></td>
+                                <td style="font-size:12.5px; color:#50575e;">
+                                    <?php echo $top_miss !== '' ? esc_html(mb_strimwidth($top_miss, 0, 120, '…')) : '—'; ?>
+                                </td>
                                 <td>
                                     <button type="button" class="button button-small toggle-feedback" data-target="feedback-<?php echo intval($row->id); ?>">
                                         Деталі
@@ -616,7 +747,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 </td>
                             </tr>
                             <tr id="feedback-<?php echo intval($row->id); ?>" class="feedback-row" style="display:none; background:#f9f9f9;">
-                                <td colspan="9">
+                                <td colspan="10">
                                     <div style="padding:16px 12px;">
                                         <?php if (!empty($row->scenario_summary)) : ?>
     <h4 style="margin:0 0 8px;">Сценарій</h4>
@@ -814,7 +945,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         if (inputEl) {
             setInputEnabled(!(state.isLoading || state.chatEnded));
             if (state.followupMode && !state.chatEnded) {
-                inputEl.setAttribute('data-placeholder', 'Напишіть фолоуап (підсумок + наступний крок)...');
+                inputEl.setAttribute('data-placeholder', 'Напишіть фолоуап: підсумок + м’яка допомога з покупкою...');
             } else if (state.chatEnded) {
                 inputEl.setAttribute('data-placeholder', 'Чат завершено. Можна оцінити ще раз або почати новий сценарій.');
             } else {
