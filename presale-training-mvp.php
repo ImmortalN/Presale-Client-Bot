@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.9
+ * Version: 0.4.10
  * Author: Immortal
  */
 
@@ -88,6 +88,11 @@ class Presale_Training_MVP {
             'methods'             => 'POST',
             'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'handle_evaluate_request'],
+        ]);
+        register_rest_route('training/v1', '/results/delete', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'can_manage'],
+            'callback'            => [__CLASS__, 'handle_delete_results_request'],
         ]);
     }
 
@@ -507,6 +512,39 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         return rest_ensure_response($response);
     }
 
+    public static function handle_delete_results_request(WP_REST_Request $request) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'presale_training_results';
+
+        $ids = $request->get_param('ids');
+        if (!is_array($ids) || empty($ids)) {
+            return new WP_REST_Response(['error' => 'No ids provided'], 400);
+        }
+
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), function ($id) {
+            return $id > 0;
+        })));
+
+        if (empty($ids)) {
+            return new WP_REST_Response(['error' => 'No valid ids'], 400);
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM $table_name WHERE id IN ($placeholders)",
+            $ids
+        ));
+
+        if ($deleted === false) {
+            return new WP_REST_Response(['error' => 'Delete failed'], 500);
+        }
+
+        return rest_ensure_response([
+            'deleted' => (int) $deleted,
+            'ids'     => $ids,
+        ]);
+    }
+
     private static function extract_score($text, $key) {
         $patterns = [
             '/' . preg_quote($key, '/') . '[^0-9%]{0,50}?(\d{1,3})\s*%/ui',
@@ -665,10 +703,12 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         }
 
         $agents = $wpdb->get_col("SELECT DISTINCT agent_name FROM $table_name WHERE agent_name <> '' ORDER BY agent_name ASC");
+        $rest_url = esc_url_raw(rest_url('training/v1/results/delete'));
+        $nonce    = wp_create_nonce('wp_rest');
         ?>
         <div class="wrap">
             <h1>Presale Training — Результати</h1>
-            <p class="description">Оцінені діалоги. Фільтруйте по агенту та overall score. «Top miss» — перший пункт з Opportunities for Improvement.</p>
+            <p class="description">Оцінені діалоги. Фільтруйте по агенту та overall score. «Top miss» — перший пункт з Opportunities for Improvement. Можна видалити порожні або зайві записи.</p>
 
             <form method="get" style="margin:16px 0; display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
                 <input type="hidden" name="page" value="presale-training-results" />
@@ -700,19 +740,26 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
             <?php if (empty($results)) : ?>
                 <p>Немає результатів за обраними фільтрами.</p>
             <?php else : ?>
-                <table class="wp-list-table widefat fixed striped" style="margin-top: 8px;">
+                <div style="margin:12px 0; display:flex; gap:8px; align-items:center;">
+                    <button type="button" class="button" id="pt-delete-selected" disabled>Видалити вибрані</button>
+                    <span id="pt-delete-status" style="color:#646970; font-size:13px;"></span>
+                </div>
+                <table class="wp-list-table widefat fixed striped" style="margin-top: 8px;" id="pt-results-table">
                     <thead>
                         <tr>
+                            <th style="width:36px; text-align:center;">
+                                <input type="checkbox" id="pt-select-all" title="Вибрати всі" />
+                            </th>
                             <th style="width:50px;">ID</th>
-                            <th style="width:140px;">Дата</th>
-                            <th style="width:120px;">Агент</th>
-                            <th style="width:80px; text-align:center;">Overall</th>
-                            <th style="width:80px; text-align:center;">Discovery</th>
-                            <th style="width:80px; text-align:center;">Architecture</th>
-                            <th style="width:80px; text-align:center;">Commercial</th>
-                            <th style="width:70px; text-align:center;">Tone</th>
+                            <th style="width:130px;">Дата</th>
+                            <th style="width:110px;">Агент</th>
+                            <th style="width:75px; text-align:center;">Overall</th>
+                            <th style="width:75px; text-align:center;">Discovery</th>
+                            <th style="width:75px; text-align:center;">Architecture</th>
+                            <th style="width:75px; text-align:center;">Commercial</th>
+                            <th style="width:65px; text-align:center;">Tone</th>
                             <th>Top miss</th>
-                            <th style="width:90px;">Дії</th>
+                            <th style="width:130px;">Дії</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -725,9 +772,13 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 else                   $score_class = 'color:#d63638;font-weight:600;';
                             }
                             $top_miss = self::extract_top_miss($row->feedback ?? '');
+                            $is_empty = ($overall === null && empty($row->feedback));
                         ?>
-                            <tr>
-                                <td><?php echo esc_html($row->id); ?></td>
+                            <tr data-result-id="<?php echo intval($row->id); ?>" <?php echo $is_empty ? 'style="background:#fff8f0;"' : ''; ?>>
+                                <td style="text-align:center;">
+                                    <input type="checkbox" class="pt-row-check" value="<?php echo intval($row->id); ?>" />
+                                </td>
+                                <td><?php echo esc_html($row->id); ?><?php echo $is_empty ? ' <span style="color:#d63638;font-size:11px;">empty</span>' : ''; ?></td>
                                 <td><?php echo esc_html($row->created_at); ?></td>
                                 <td><?php echo esc_html($row->agent_name); ?></td>
                                 <td style="text-align:center; <?php echo $score_class; ?>">
@@ -738,16 +789,19 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 <td style="text-align:center;"><?php echo $row->commercial_score !== null ? esc_html($row->commercial_score) . '%' : '—'; ?></td>
                                 <td style="text-align:center;"><?php echo $row->tone_score !== null ? esc_html($row->tone_score) . '%' : '—'; ?></td>
                                 <td style="font-size:12.5px; color:#50575e;">
-                                    <?php echo $top_miss !== '' ? esc_html(mb_strimwidth($top_miss, 0, 120, '…')) : '—'; ?>
+                                    <?php echo $top_miss !== '' ? esc_html(mb_strimwidth($top_miss, 0, 100, '…')) : '—'; ?>
                                 </td>
                                 <td>
                                     <button type="button" class="button button-small toggle-feedback" data-target="feedback-<?php echo intval($row->id); ?>">
                                         Деталі
                                     </button>
+                                    <button type="button" class="button button-small button-link-delete pt-delete-one" data-id="<?php echo intval($row->id); ?>" style="color:#b32d2e;">
+                                        Видалити
+                                    </button>
                                 </td>
                             </tr>
                             <tr id="feedback-<?php echo intval($row->id); ?>" class="feedback-row" style="display:none; background:#f9f9f9;">
-                                <td colspan="10">
+                                <td colspan="11">
                                     <div style="padding:16px 12px;">
                                         <?php if (!empty($row->scenario_summary)) : ?>
     <h4 style="margin:0 0 8px;">Сценарій</h4>
@@ -780,7 +834,97 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                 </table>
 
                 <script>
-                    document.addEventListener('DOMContentLoaded', function() {
+                    (function() {
+                        const restUrl = <?php echo wp_json_encode($rest_url); ?>;
+                        const nonce = <?php echo wp_json_encode($nonce); ?>;
+                        const selectAll = document.getElementById('pt-select-all');
+                        const deleteSelectedBtn = document.getElementById('pt-delete-selected');
+                        const statusEl = document.getElementById('pt-delete-status');
+
+                        function getCheckedIds() {
+                            return Array.from(document.querySelectorAll('.pt-row-check:checked')).map(function(el) {
+                                return parseInt(el.value, 10);
+                            }).filter(Boolean);
+                        }
+
+                        function updateBulkButton() {
+                            const ids = getCheckedIds();
+                            deleteSelectedBtn.disabled = ids.length === 0;
+                            deleteSelectedBtn.textContent = ids.length
+                                ? 'Видалити вибрані (' + ids.length + ')'
+                                : 'Видалити вибрані';
+                        }
+
+                        function removeRowsByIds(ids) {
+                            ids.forEach(function(id) {
+                                const row = document.querySelector('tr[data-result-id="' + id + '"]');
+                                const feedback = document.getElementById('feedback-' + id);
+                                if (row) row.remove();
+                                if (feedback) feedback.remove();
+                            });
+                            updateBulkButton();
+                            if (!document.querySelector('#pt-results-table tbody tr[data-result-id]')) {
+                                location.reload();
+                            }
+                        }
+
+                        async function deleteIds(ids) {
+                            if (!ids.length) return;
+                            const label = ids.length === 1 ? 'цей результат' : (ids.length + ' результатів');
+                            if (!window.confirm('Видалити ' + label + '? Цю дію не можна скасувати.')) {
+                                return;
+                            }
+                            statusEl.textContent = 'Видалення...';
+                            deleteSelectedBtn.disabled = true;
+                            try {
+                                const res = await fetch(restUrl, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'X-WP-Nonce': nonce
+                                    },
+                                    body: JSON.stringify({ ids: ids })
+                                });
+                                const data = await res.json();
+                                if (!res.ok || data.error) {
+                                    statusEl.textContent = data.error || 'Помилка видалення';
+                                    updateBulkButton();
+                                    return;
+                                }
+                                statusEl.textContent = 'Видалено: ' + (data.deleted || ids.length);
+                                removeRowsByIds(ids);
+                            } catch (e) {
+                                statusEl.textContent = 'Помилка мережі';
+                                updateBulkButton();
+                            }
+                        }
+
+                        if (selectAll) {
+                            selectAll.addEventListener('change', function() {
+                                document.querySelectorAll('.pt-row-check').forEach(function(cb) {
+                                    cb.checked = selectAll.checked;
+                                });
+                                updateBulkButton();
+                            });
+                        }
+
+                        document.querySelectorAll('.pt-row-check').forEach(function(cb) {
+                            cb.addEventListener('change', updateBulkButton);
+                        });
+
+                        if (deleteSelectedBtn) {
+                            deleteSelectedBtn.addEventListener('click', function() {
+                                deleteIds(getCheckedIds());
+                            });
+                        }
+
+                        document.querySelectorAll('.pt-delete-one').forEach(function(btn) {
+                            btn.addEventListener('click', function() {
+                                const id = parseInt(btn.getAttribute('data-id'), 10);
+                                if (id) deleteIds([id]);
+                            });
+                        });
+
                         document.querySelectorAll('.toggle-feedback').forEach(function(btn) {
                             btn.addEventListener('click', function() {
                                 const targetId = this.getAttribute('data-target');
@@ -788,8 +932,8 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 if (!row) return;
 
                                 const isHidden = row.style.display === 'none' || row.style.display === '';
-                                document.querySelectorAll('.feedback-row').forEach(r => r.style.display = 'none');
-                                document.querySelectorAll('.toggle-feedback').forEach(b => b.textContent = 'Деталі');
+                                document.querySelectorAll('.feedback-row').forEach(function(r) { r.style.display = 'none'; });
+                                document.querySelectorAll('.toggle-feedback').forEach(function(b) { b.textContent = 'Деталі'; });
 
                                 if (isHidden) {
                                     row.style.display = 'table-row';
@@ -797,7 +941,7 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
                                 }
                             });
                         });
-                    });
+                    })();
                 </script>
             <?php endif; ?>
         </div>
