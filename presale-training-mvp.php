@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Presale Training MVP
  * Description: WP admin chat trainer with OpenRouter roleplay and evaluation.
- * Version: 0.4.7
+ * Version: 0.4.8
  * Author: Immortal
  */
 
@@ -163,7 +163,16 @@ class Presale_Training_MVP {
     }
 
     public static function handle_start_request() {
-        $scenario_prompt = "Generate ONE realistic presale customer scenario for Crocoblock (JetEngine, JetFormBuilder, JetBooking, JetSmartFilters, All-Inclusive plan, etc.).\n\n"
+        $scenario_prompt = "Generate ONE realistic presale customer scenario for Crocoblock.\n\n"
+            . "DIVERSITY RULE (critical): Most real clients come for JetEngine (directories, CPTs, relations), JetSmartFilters, JetFormBuilder, listings, membership/user dashboards, or All-Inclusive value — NOT booking.\n"
+            . "Booking / appointments / JetBooking should appear in at most ~20% of scenarios. Prefer non-booking use cases the majority of the time.\n\n"
+            . "Possible use-case families (pick one, vary across generations):\n"
+            . "- JetEngine directory / listings / custom post types / relations\n"
+            . "- JetSmartFilters + search/filter UX on a catalog or directory\n"
+            . "- JetFormBuilder (application forms, multi-step, payments, user-generated content)\n"
+            . "- User dashboard / membership / profile pages\n"
+            . "- All-Inclusive vs separate plugins (value / renewal)\n"
+            . "- Occasional: booking / appointments (keep rare)\n\n"
             . "The customer should have a concrete project and natural reasons to discuss PRICING, plans (single plugins vs All-Inclusive), value, licensing, or comparisons — not only pure feature questions.\n\n"
             . "Return ONLY valid JSON with these exact keys:\n"
             . "- customer_type (string)\n"
@@ -329,42 +338,41 @@ class Presale_Training_MVP {
         $eval_prompt = "You are an expert AI Coach and Evaluator for Crocoblock Presale Agents. Analyze the chat between a support agent and a prospective client. Evaluate only the AGENT messages (role \"user\" in the JSON) against Crocoblock presale methodology.
 
 ### CORE PRESALE PHILOSOPHY
-The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing unauthorized facts, discounts, or policy interpretations. Approved internal policies (up to 10% discount on most expensive plans, locked renewal price) are allowed.
+The agent must act as a Solution Architect and Consultant, not a static information directory. Guide the client, show business value of the ecosystem, and confidently lead the conversation toward a clear next step — without inventing unauthorized facts, discounts, or policy interpretations. Approved internal policies (up to 10% discount on most expensive plans, locked renewal price) are allowed, but only when they help the deal.
 
 ### RULES THE AGENT MUST FOLLOW
-1. Discovery first — ideally already in the FIRST agent reply: open-ended clarifying questions about goals, workflows, and architecture before a heavy product pitch. Empty greetings like only \"Hi, how can I help?\" without substance lower the Discovery score.
-   - For multi-provider booking/directory platforms, good discovery asks how providers work (own availability/services/calendars? self-manage bookings or central admin?).
-   - Do NOT penalize for missing questions that do not affect product/plan choice (e.g. generic traffic volume is often optional).
+1. Discovery — useful, not ritualistic:
+   - Reward clarifying questions that actually affect product/plan choice or architecture (goals, content structure, who creates content, filters needed, forms vs CPT, multi-user roles, etc.).
+   - If the client already stated a clear need and is asking about price/plan, do NOT require deep workflow interrogation (e.g. detailed booking provider calendars) just to \"check the discovery box\".
+   - Empty greetings like only \"Hi, how can I help?\" without substance still lower the Discovery score.
+   - Do NOT invent discovery gaps the client never opened (e.g. \"should have asked about ACF + BookingPress\" when the client never mentioned third-party plugins or alternatives).
 2. Outcome vs Feature: never a flat \"no\"; map missing features to JetEngine + other tools when realistic.
 3. Power pairs & bundles: group plugins by the client's business scenario; build value before price.
 4. Personalization when natural.
 5. Conversion checklist (apply when a commercial moment appears — not mechanically in every reply):
    - Upsell / Cross-sell — relevant additional plugins tied to the use case; All-Inclusive vs separate when relevant.
    - Clear Pricing & Totals — exact calculations when pricing is discussed.
-   - Promotion / FOMO — ONLY when a legitimate active promotion or real deadline exists, OR when using the approved internal policy of up to 10% discount on the most expensive plans. NEVER invent higher discounts, promo codes, urgency, scarcity, or expiration dates.
-   - Direct CTA — clear next action or relevant purchase/pricing link (lead the conversation; avoid only \"if you'd like / if you tell me\").
+   - Promotion / FOMO / Discount — ONLY when it helps close a hesitant deal. If the client is already satisfied with the price and is within budget, NOT offering the internal 10% discount is correct and must NOT be scored as a miss. NEVER invent higher discounts, promo codes, urgency, scarcity, or expiration dates.
+   - Soft next step / help with purchase — offer help if the client wants to buy (e.g. \"Need any help with the purchase?\" or \"I can walk you through adding the plan if you want\"). Do NOT require or reward hard checkout links / cart URLs. Clients add the subscription to the cart themselves; a pushy checkout link is inappropriate.
    - Risk Reversal — mention the 30-day refund policy when it reduces hesitation; do not over-interpret eligibility beyond official terms.
    - Support Value — mention support when relevant to complexity or risk.
-   - Defined Next Steps — clearly recommend what the client should do next.
-6. Factual & Policy Accuracy (mandatory):
-   - NEVER invent discounts higher than the approved limit, fake promo codes, non-existent deadlines, licensing rights, refund eligibility, support terms, activation limits, or product capabilities.
-   - Distinguish using a license on a client project vs transferring/reselling a license. Never imply resale/transfer unless explicitly permitted.
-   - If policy details are uncertain, qualify the answer or point to official terms — do not invent certainty.
-   - Corrected blueprints must also obey this rule: no fictional discounts or fake FOMO.
-   - ALLOWED (do NOT penalize these as factual errors):
-     • Offering up to 10% discount on the most expensive plans (Lifetime, Unlimited Plus / high-tier annual plans) when appropriate for the deal. This is an approved internal policy.
-     • Stating that renewal price is locked to the price the client paid at the moment of purchase (the client continues paying the same renewal amount).
-     • Real arithmetic value comparisons (e.g. All-Inclusive vs buying plugins + JetFormBuilder PRO add-ons separately, including typical ~$49 differences when relevant).
-     • Mentioning that All-Inclusive includes JetFormBuilder PRO + add-ons for the first year (standard current entitlement).
-   - Still penalize heavily: inventing discounts >10%, inventing promo codes, claiming discounts on cheaper plans without basis, inventing urgency/scarcity that does not exist, or inventing licensing/refund rules.
+   - Defined Next Steps — clearly recommend what the client should do next, without treating them as a money bag.
+
+### FACTUAL ACCURACY (NON-NEGOTIABLE)
+- Allowed:
+  • Offering up to 10% discount on the most expensive plans (Lifetime, Unlimited Plus / high-tier annual plans) ONLY when the client shows price hesitation or the deal is stuck. If the client already accepts the price / is within budget, skipping the discount is fine and preferred.
+  • Stating that renewal price is locked to the price the client paid at the moment of purchase.
+  • Real arithmetic value comparisons (e.g. All-Inclusive vs buying plugins + JetFormBuilder PRO add-ons separately, including typical ~\$49 differences when relevant).
+  • Mentioning that All-Inclusive includes JetFormBuilder PRO + add-ons for the first year (standard current entitlement).
+- Still penalize heavily: inventing discounts >10%, inventing promo codes, claiming discounts on cheaper plans without basis, inventing urgency/scarcity, inventing licensing/refund rules, inventing competitor comparisons the client never raised.
 
 ### SCORING GUIDANCE (0–100 integers)
-- Discovery & Requirements Gathering: reward useful architecture questions; do not require irrelevant ones.
-- Solution Architecture: plugins mapped to needs; multi-provider complexity handled when present.
-- Commercial Pitch & Conversion Checklist: value + clear next step; missing CTA hurts more than missing FOMO when no promo exists. Invented FOMO or unauthorized discounts in the chat (or in a blueprint) is a serious flaw. Approved 10% discount on expensive plans and locked-renewal statements are NOT flaws.
-- Tone, Simplicity & Clarity: warm, clear, not overly long or jargon-heavy. Do not demand both \"stronger commercial close\" and \"much shorter\" in a contradictory way.
+- Discovery & Requirements Gathering: reward useful architecture questions that change the recommendation; do not require irrelevant ones or punish a short path when the client already decided and asked for price.
+- Solution Architecture: plugins mapped to needs; handle complexity only when it is present in the chat/scenario.
+- Commercial Pitch & Conversion Checklist: value + soft clear next step. Missing FOMO/discount is NOT a flaw when the client is already happy with the price. Hard checkout links are a weakness, not a strength. Soft \"need help with purchase?\" is enough.
+- Tone, Simplicity & Clarity: warm, clear, not overly long or jargon-heavy; not pushy or treating the client as an idiot who cannot reach checkout.
 - Overall Presale Score = average of the four above (round to nearest integer).
-- Do not heavily punish strong consultative discovery/architecture just because FOMO was absent when no real promotion applies.
+- Do not invent improvement points the chat never supported (missing discount, missing third-party comparison, missing deep booking discovery when irrelevant).
 
 ### OUTPUT FORMAT — STRICT
 Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same line as the label so they can be parsed.
@@ -386,7 +394,8 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
 - **Overall Presale Score**: XX%
 
 **5. Corrected Response Blueprint**
-[Rewritten strong agent reply. Must stay factually accurate: no invented discounts beyond the approved 10% on expensive plans, no fake deadlines, licensing claims, or policy guarantees. Locked renewal price and real value comparisons are allowed. Prefer clear recommendation + next step + real risk reversal/support when relevant.]";
+[Rewritten strong agent reply. Must stay factually accurate: no invented discounts beyond the approved 10% on expensive plans (and only if price hesitation exists), no fake deadlines, licensing claims, or policy guarantees. Locked renewal price and real value comparisons are allowed. Prefer clear recommendation + soft next step (help with purchase, not a hard checkout link) + real risk reversal/support when relevant.]";
+
 
         $user_content = "SCENARIO:\n" . (is_array($scenario) ? wp_json_encode($scenario, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) : (string) $scenario)
             . "\n\nCHAT MESSAGES (assistant = client, user = agent):\n"
@@ -484,9 +493,9 @@ Use EXACTLY this layout (English). Scores must appear as \"NN%\" on the same lin
         return [
             'customer_type' => 'freelance web designer',
             'mood'          => 'interested but budget-conscious',
-            'use_case'      => 'building a directory + booking site for local services',
+            'use_case'      => 'building a directory of local businesses with advanced filters and listing pages',
             'concerns'      => 'price of All-Inclusive vs buying plugins separately, learning curve',
-            'first_message' => 'Hi! I need a directory with booking for local services. Is the All-Inclusive plan worth it or should I just get JetEngine + JetBooking?',
+            'first_message' => 'Hi! I need a directory of local businesses with filters and custom listing pages. Is the All-Inclusive plan worth it or should I just get JetEngine + JetSmartFilters?',
         ];
     }
 
